@@ -1,5 +1,3 @@
-from time import sleep
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -21,84 +19,105 @@ def debug_print(message):
     if DEBUG_MODE:
         print(message)
 
+
 class WorkshopEnv(gym.Env):
     """
-    An environment simulating a workshop warehouse with a moving agent.
-    This version uses an event-driven reward structure similar to the TUM warehouse.
+    --- MODIFIED: Simplified environment with high-level actions ---
+    An environment simulating a workshop warehouse. The agent uses high-level
+    actions (e.g., "go get item") and a pathfinder handles the movement.
     """
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(self, width=10, height=5, item_catalog=None, num_tasks_per_episode=5, render_mode="human"):
         super(WorkshopEnv, self).__init__()
         debug_print("--- [ENV INIT] ---")
 
-        # --- Layout, Items, Agent ---
+        # --- Layout, Items, Agent (Mostly Unchanged) ---
         self.width, self.height = width, height
         self.staging_area_pos = (width // 2, 0)
+        # Layout: 1 for racks (obstacles), 0 for aisles (walkable)
         self.layout_matrix = np.ones((height, width), dtype=int)
         self.layout_matrix[:, width // 2] = 0
         self.layout_matrix[self.staging_area_pos[1], self.staging_area_pos[0]] = 0
+        self.max_popularity = 100.0
         self.rack_locations = self._get_rack_locations()
         self.num_racks = len(self.rack_locations)
 
         self.agent_pos = None
         self.agent_inventory = None
         self.num_items = self.num_racks
-        self.max_popularity = 100
         self.item_catalog = self._generate_item_catalog() if item_catalog is None else item_catalog
 
         self.num_tasks_per_episode = num_tasks_per_episode
         self.staging_area_queue = []
         self.rack_contents = {}
 
-        # --- RL Definitions ---
-        self.action_space = spaces.Discrete(6)
-        obs_size = 2 + 1 + 1 + self.num_racks
+        # --- MODIFIED: RL Definitions ---
+        # Action space is now high-level: 0: Go to Staging & Pick, 1: Go to Rack & Put
+        self.action_space = spaces.Discrete(2)
+
+        # Observation space is now smaller and fixed:
+        # [agent_x, agent_y, inventory_item_id, next_task_id, closest_rack_x, closest_rack_y]
+        obs_size = 6
         self.observation_space = spaces.Box(
             low=-1, high=max(width, height, self.num_items), shape=(obs_size,), dtype=np.float32
         )
-        debug_print("--- [ENV INIT] Environment created successfully. ---\n")
-        self.reset()
 
+        # --- Rendering (Unchanged) ---
         self.render_mode = render_mode
         self.cell_size = 50
         self.window_size = (self.width * self.cell_size, self.height * self.cell_size)
         self.window = None
         self.clock = None
-        self.metadata = {"render_fps": 30}
 
-        debug_print("--- [ENV INIT] Environment created successfully. ---\n")
+        debug_print("--- [ENV INIT] Simplified Environment created successfully. ---\n")
         self.reset()
 
+    # --- HELPER METHODS (Mostly Unchanged) ---
     def _get_rack_locations(self):
         return [(x, y) for y in range(self.height) for x in range(self.width) if self.layout_matrix[y, x] == 1]
 
     def _calculate_travel_time_manhattan(self, start, end):
-        """Calculates travel time using Manhattan distance."""
         return abs(start[0] - end[0]) + abs(start[1] - end[1])
 
     def _generate_item_catalog(self):
         catalog = {}
         for i in range(self.num_items):
             rand_val = np.random.rand()
-            if rand_val < 0.2:
-                popularity = np.random.randint(80, self.max_popularity + 1)
-            elif rand_val < 0.5:
-                popularity = np.random.randint(20, 80)
-            else:
-                popularity = np.random.randint(1, 20)
+            if rand_val < 0.2: popularity = np.random.randint(80, self.max_popularity + 1)
+            elif rand_val < 0.5: popularity = np.random.randint(20, 80)
+            else: popularity = np.random.randint(1, 20)
             catalog[i] = {'id': i, 'popularity': popularity}
         return catalog
 
+    # --- NEW: Helper to find the closest empty storage location ---
+    def _find_closest_empty_rack(self):
+        empty_racks = [rack for rack in self.rack_locations if rack not in self.rack_contents]
+        if not empty_racks:
+            return None
+
+        closest_rack = min(
+            empty_racks,
+            key=lambda rack: self._calculate_travel_time_manhattan(self.agent_pos, rack)
+        )
+        return closest_rack
+
+    # --- MODIFIED: Create the new, smaller observation vector ---
     def _get_obs(self):
-        obs = [self.agent_pos[0], self.agent_pos[1]]
-        obs.append(self.agent_inventory if self.agent_inventory is not None else -1)
-        next_item = self.staging_area_queue[0] if self.staging_area_queue else -1
-        obs.append(next_item)
-        rack_obs = [-1] * self.num_racks
-        for i, rack_pos in enumerate(self.rack_locations):
-            if rack_pos in self.rack_contents:
-                rack_obs[i] = self.rack_contents[rack_pos]
-        obs.extend(rack_obs)
+        # Agent position
+        obs = [float(self.agent_pos[0]), float(self.agent_pos[1])]
+        # Agent inventory
+        obs.append(float(self.agent_inventory) if self.agent_inventory is not None else -1.0)
+        # Next item in queue
+        obs.append(float(self.staging_area_queue[0]) if self.staging_area_queue else -1.0)
+
+        # Position of the closest empty rack
+        closest_rack = self._find_closest_empty_rack()
+        if closest_rack:
+            obs.extend([float(closest_rack[0]), float(closest_rack[1])])
+        else:
+            obs.extend([-1.0, -1.0])  # No empty racks available
+
         return np.array(obs, dtype=np.float32)
 
     def reset(self, seed=None, options=None):
@@ -107,67 +126,75 @@ class WorkshopEnv(gym.Env):
         self.agent_pos = self.staging_area_pos
         self.agent_inventory = None
         self.rack_contents = {}
-        self.staging_area_queue = [random.randint(0, self.num_items - 1) for _ in range(self.num_tasks_per_episode)]
+        # Generate a list of unique items for the episode's tasks
+        items = list(range(self.num_items))
+        random.shuffle(items)
+        self.staging_area_queue = items[:self.num_tasks_per_episode]
+
         debug_print(f"  [RESET] New tasks in staging area: {self.staging_area_queue}")
         return self._get_obs(), {}
 
+    # --- MODIFIED: Core step logic now uses pathfinding for high-level actions ---
     def step(self, action):
         debug_print(f"\n--- [STEP] ---")
-        debug_print(f"Agent at {self.agent_pos} (carrying: {self.agent_inventory}) chose action: {action}")
-        reward = 0  # Default penalty for time
+        debug_print(f"Agent at {self.agent_pos} (carrying: {self.agent_inventory}) chose high-level action: {action}")
+
+        reward = 0
         terminated = False
 
-        if not self.action_space.contains(action):
-            raise ValueError(f"Invalid action {action}. Action must be in [0, {self.action_space.n - 1}])")
+        # --- MODIFIED: Pathfinding is no longer needed ---
 
-        if action < 4:  # Move
-            move_deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-            dx, dy = move_deltas[action]
-            new_pos = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
-            if (0 <= new_pos[0] < self.width and 0 <= new_pos[1] < self.height and
-                    self.layout_matrix[new_pos[1], new_pos[0]] == 0):
-                self.agent_pos = new_pos
-                reward -= 1
-            else:
-                reward -= 10  # Penalty for bumping into a wall
-
-        elif action == 4:  # Pick
-            if self.agent_pos == self.staging_area_pos and self.agent_inventory is None and self.staging_area_queue:
-                self.agent_inventory = self.staging_area_queue.pop(0)
-                reward += 10  # Success reward for making progress
-            else:
-                reward -= 20  # Penalty for invalid action
-
-        elif action == 5:  # Put
+        # Action 0: Go to Staging Area & Pick
+        if action == 0:
             if self.agent_inventory is not None:
-                target_rack = None
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    check_pos = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
-                    if check_pos in self.rack_locations and check_pos not in self.rack_contents:
-                        target_rack = check_pos
-                        break
-                if target_rack:
-                    item_id_placed = self.agent_inventory
-                    item_popularity = self.item_catalog[item_id_placed]['popularity']
-                    distance = self._calculate_travel_time_manhattan(target_rack, self.staging_area_pos)
-
-                    # Reward is higher for popular items and closer placements.
-                    # Add 1 to distance to prevent division by zero and moderate rewards for the closest spots.
-                    placement_reward = (item_popularity / (distance + 1)) * 10  # Scaled reward
-                    reward += placement_reward
-
-                    self.rack_contents[target_rack] = self.agent_inventory
-                    self.agent_inventory = None
-                    debug_print(f"  [STEP-PUT] Success! Placed item at {target_rack}.")
-                else:
-                    reward -= 20  # Penalty for invalid action
+                reward -= 50  # Heavy penalty for trying to pick when already carrying something
             else:
-                reward -= 20  # Penalty for invalid action
+                # Calculate distance for penalty, then teleport
+                distance = self._calculate_travel_time_manhattan(self.agent_pos, self.staging_area_pos)
+                reward -= distance  # Time penalty based on distance
+                self.agent_pos = self.staging_area_pos  # Teleport agent to destination
 
+                if self.staging_area_queue:
+                    self.agent_inventory = self.staging_area_queue.pop(0)
+                    reward += 20  # Reward for successful pick
+                    debug_print(
+                        f"  [STEP-PICK] Success! Agent picked item {self.agent_inventory}. Distance: {distance}")
+                else:
+                    reward -= 20  # Penalty for going to staging when it's empty
+
+        # Action 1: Go to Closest Empty Rack & Put
+        elif action == 1:
             if self.agent_inventory is None:
-                self.agent_pos = self.staging_area_pos
+                reward -= 50  # Heavy penalty for trying to put when empty-handed
+            else:
+                target_rack = self._find_closest_empty_rack()
+                debug_print(f"[CLOSET_RACK]: {target_rack}")
+                if target_rack is None:
+                    reward -= 50  # Heavy penalty, no place to put the item
+                else:
+                    # Find the closest walkable spot next to the rack
+                    access_spots = []
+                    rx, ry = target_rack
+                    for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                        spot = (rx + dx, ry + dy)
+                        if (0 <= spot[0] < self.width and 0 <= spot[1] < self.height and
+                                self.layout_matrix[spot[1], spot[0]] == 0):
+                            access_spots.append(spot)
 
-        # --- Termination Logic ---
+                    if not access_spots:
+                        reward -= 50
+                    else:
+                        destination = min(access_spots,
+                                          key=lambda spot: self._calculate_travel_time_manhattan(self.agent_pos, spot))
+
+                        self.agent_pos = destination  # Teleport agent to the access spot
+
+                        self.rack_contents[target_rack] = self.agent_inventory
+                        self.agent_inventory = None
+                        reward += 30  # Reward for successful placement
+                        debug_print(f"  [STEP-PUT] Success! Placed item at {target_rack}.")
+
+        # --- Termination Logic (Unchanged) ---
         if not self.staging_area_queue and self.agent_inventory is None:
             debug_print("  [STEP-TERMINAL] All tasks complete. Terminating episode.")
             reward += 500  # Large completion bonus
@@ -233,8 +260,7 @@ class WorkshopEnv(gym.Env):
         pygame.draw.rect(canvas, colors["staging"], rect)
         if self.staging_area_queue:
             # Render the next item ID in the staging area
-            text = pygame.font.SysFont("Arial", size=36).render(f"S:{self.staging_area_queue[0]}", True,
-                                                                (0, 0, 0))  # Black text
+            text = pygame.font.SysFont("Arial", size=36).render(f"S:{self.staging_area_queue[0]}", True, (0, 0, 0))  # Black text
             canvas.blit(text, text.get_rect(center=rect.center))
 
         # Draw agent
@@ -250,8 +276,7 @@ class WorkshopEnv(gym.Env):
             pygame.draw.circle(canvas, color, agent_rect.center, self.cell_size // 4)
 
             # --- ADDED: Render the class letter on the carried item ---
-            text_surf = pygame.font.SysFont("Arial", size=36).render(item_class, True,
-                                                                     (0, 0, 0))  # Black text for contrast
+            text_surf = pygame.font.SysFont("Arial", size=36).render(item_class, True, (0, 0, 0))  # Black text for contrast
             text_rect = text_surf.get_rect(center=agent_rect.center)
             canvas.blit(text_surf, text_rect)
 
@@ -324,7 +349,7 @@ def run_game_mode(model_path):
 if __name__ == '__main__':
 
     TRAIN_MODELS = False
-    EVALUATE_MODEL = True
+    EVALUATE_MODEL = False
 
     # --- DQN Training ---
     dqn_log_dir = "dqn_workshop_logs"
@@ -350,7 +375,7 @@ if __name__ == '__main__':
             policy_kwargs=policy_kwargs
         )
         print("--- Starte DQN Training... ---")
-        model_dqn.learn(total_timesteps=5000000)
+        model_dqn.learn(total_timesteps=1000000)
         model_dqn.save(dqn_model_path)
         print(f"--- DQN Training abgeschlossen. Modell gespeichert unter {dqn_model_path} ---")
 
@@ -384,7 +409,6 @@ if __name__ == '__main__':
                 total_reward += reward
                 done = terminated or truncated
                 eval_env.render()
-            sleep(5)
             dqn_rewards.append(total_reward)
             eval_env.close()
 
