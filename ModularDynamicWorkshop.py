@@ -1,5 +1,5 @@
 import os
-
+import json  # Hinzugefügt
 import gymnasium as gym
 from gymnasium import spaces
 from matplotlib import pyplot as plt
@@ -15,46 +15,41 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 class DynamicWorkshop(gym.Env):
     """
     A more realistic workshop environment that handles both put-away and
-    picking tasks with dynamic item popularity.
+    picking tasks with dynamic item popularity, configured via a JSON file.
     """
     metadata = {"render_modes": ["human"], "render_fps": 10}
-    # DEBUG: Action mapping for clear print statements
     ACTION_MAP = {0: "MOVE UP", 1: "MOVE DOWN", 2: "MOVE LEFT", 3: "MOVE RIGHT", 4: "PUT"}
-    STATIC_ITEM_CATALOG = {
-        # --- High Popularity (80-100) ---
-        0: {'id': 0, 'popularity': 98},
-        1: {'id': 1, 'popularity': 85},
-        # --- Medium Popularity (20-79) ---
-        2: {'id': 2, 'popularity': 75},
-        3: {'id': 3, 'popularity': 52},
-        4: {'id': 4, 'popularity': 30},
-        # --- Low Popularity (1-19) ---
-        5: {'id': 5, 'popularity': 18},
-        6: {'id': 6, 'popularity': 15},
-        7: {'id': 7, 'popularity': 11},
-        8: {'id': 8, 'popularity': 6},
-        9: {'id': 9, 'popularity': 2},
-    }
 
-    def __init__(self):
+    def __init__(self, config_path):
         super(DynamicWorkshop, self).__init__()
-        # --- Core Properties ---
-        self.height = 9
-        self.width = 7
-        self.io_point = (0, 8)
-        self.num_initial_tasks = 9
-        self.task_queue = []
-        self.layout_matrix = np.zeros((self.height, self.width), dtype=int)
-        self.layout_matrix[:, 1:3] = 1
-        self.layout_matrix[:, 4:6] = 1
-        self.layout_matrix[0, :] = 0
-        self.layout_matrix[8, :] = 0
+
+        # --- Lade Konfiguration aus JSON-Datei ---
+        with open(config_path, 'r') as f:
+            self.config = json.load(f)
+
+        # --- Core Properties aus Konfiguration laden ---
+        env_config = self.config['environment']
+        sim_config = self.config['simulation']
+        item_config = self.config['items']
+        self.rewards_config = self.config['rewards']
+
+        self.height = env_config['height']
+        self.width = env_config['width']
+        self.io_point = tuple(env_config['io_point'])  # Wichtig: In Tupel umwandeln
+        self.layout_matrix = np.array(env_config['layout_matrix'], dtype=int)
+
+        self.num_initial_tasks = sim_config['num_initial_tasks']
+        self.metadata['render_fps'] = sim_config['render_fps']
+
+        # --- Artikelkatalog aus Konfiguration laden ---
+        # Umwandlung von Liste zu Dictionary für schnellen Zugriff
+        self.item_catalog = {item['id']: item for item in item_config['item_catalog']}
+        self.num_item_types = len(self.item_catalog)
+        self.max_popularity = 100.0
+        self.popularity_history = []
+
         self.rack_locations = self._get_rack_locations()
         self.num_racks = len(self.rack_locations)
-        self.max_popularity = 100.0
-        self.num_item_types = len(self.STATIC_ITEM_CATALOG)
-        self.popularity_counts = [item['popularity'] for item in self.STATIC_ITEM_CATALOG.values()]
-        self.item_catalog = self.STATIC_ITEM_CATALOG
 
         # --- Agent and State ---
         self.agent_pos = None
@@ -62,24 +57,23 @@ class DynamicWorkshop(gym.Env):
         self.rack_contents = {}
         self.current_task = None
         self.accumulated_reward = 0
+        self.popularity_counts = np.array([item['popularity'] for item in self.item_catalog.values()], dtype=float)
 
         # --- RL Definitions ---
         self.travel_times = {loc: self._calculate_travel_time_manhattan(self.io_point, loc) for loc in
                              self.rack_locations}
         self.max_travel_time = max(self.travel_times.values()) if self.travel_times else 1
-        # MODIFIED: Action space is now 5 (4 moves + 1 put)
         self.action_space = spaces.Discrete(5)
         obs_size = 2 + 1 + 2 + self.num_racks
         self.observation_space = spaces.Box(
-            low=-1, high=max(self.width, self.height, len(self.STATIC_ITEM_CATALOG)), shape=(obs_size,), dtype=np.float32
+            low=-1, high=max(self.width, self.height, self.num_item_types), shape=(obs_size,), dtype=np.float32
         )
 
         # --- Visualization ---
-        self.render_mode = "human"
         self.cell_size, self.window, self.clock, self.font = 80, None, None, None
         self.window_size = (self.width * self.cell_size, self.height * self.cell_size)
 
-        print("--- Final Put-Only DynamicWorkshop Environment Initialized ---")
+        print("--- Modular DynamicWorkshop Environment Initialized from JSON ---")
         self.reset()
 
     def reset(self, seed=None, options=None):
@@ -87,7 +81,10 @@ class DynamicWorkshop(gym.Env):
         self.agent_pos = self.io_point
         self.agent_inventory = None
         self.rack_contents = {}
-        self.popularity_counts = [item['popularity'] for item in self.STATIC_ITEM_CATALOG.values()]
+        # Popularity wird aus dem Katalog zurückgesetzt
+        self.popularity_counts = np.array([item['popularity'] for item in self.item_catalog.values()], dtype=float)
+        self.popularity_history = []
+        self.popularity_history.append(list(self.popularity_counts))
         self.accumulated_reward = 0
         items_to_place = list(range(self.num_item_types))
         random.shuffle(items_to_place)
@@ -100,13 +97,13 @@ class DynamicWorkshop(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
-        reward = -1
+        # Belohnung aus Konfiguration verwenden
+        reward = self.rewards_config['step_penalty']
         terminated = False
 
-        # MODIFIED: Action routing updated for 5 actions
-        if action < 4:  # Move
+        if action < 4:
             reward += self._move_agent(action)
-        elif action == 4:  # Put
+        elif action == 4:
             reward += self._handle_put_action()
 
         reward += self.accumulated_reward
@@ -117,11 +114,13 @@ class DynamicWorkshop(gym.Env):
         if self.current_task is None:
             self.current_task = self._get_next_task_from_queue()
             if self.current_task is None:
-                reward += 500
+                # Belohnung aus Konfiguration verwenden
+                reward += self.rewards_config['completion_bonus']
                 terminated = True
 
         print(f"Inventory: {self.agent_inventory}")
         print(f"Content: {self.rack_contents}")
+        self.popularity_history.append(list(self.popularity_counts))
 
         return self._get_obs(), reward, terminated, False, {}
 
@@ -136,18 +135,17 @@ class DynamicWorkshop(gym.Env):
                 return next_task
 
             elif next_task['type'] == 'PICK':
-                task_origin = next_task['origin']
+                task_origin = tuple(next_task['origin'])  # Sicherstellen, dass es ein Tupel ist
                 if task_origin in self.rack_contents:
-                    self.rack_contents.pop(task_origin)
+                    item_id = self.rack_contents.pop(task_origin)  # Item ID aus dem Rack holen
                     travel_time = self._calculate_travel_time_manhattan(self.io_point, task_origin)
                     retrieval_score = self.max_travel_time - travel_time
-                    instant_reward = retrieval_score * 5
+                    # Belohnungsmultiplikator aus Konfiguration verwenden
+                    instant_reward = retrieval_score * self.rewards_config['pick_score_multiplier']
                     self.accumulated_reward += instant_reward
-                    print(f"PICKED: {next_task['item_id']} from {task_origin}, reward: {instant_reward:.2f}")
+                    print(f"PICKED: {item_id} from {task_origin}, reward: {instant_reward:.2f}")
 
         return None
-
-    # REMOVED: _handle_pick_action is no longer necessary
 
     def _handle_put_action(self):
         if self.current_task and self.current_task["type"] == "PUT" and self.agent_inventory is not None:
@@ -163,9 +161,28 @@ class DynamicWorkshop(gym.Env):
                     self._update_popularity(self.agent_inventory)
                     self.agent_inventory = None
                     self.current_task = None
-                    return placement_score * 200
-        return -10
+                    # Belohnungsmultiplikator aus Konfiguration verwenden
+                    return placement_score * self.rewards_config['put_score_multiplier']
+        # Belohnung aus Konfiguration verwenden
+        return self.rewards_config['failed_put_penalty']
 
+    def _move_agent(self, action):
+        move_deltas = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+        dx, dy = move_deltas[action]
+        new_pos = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
+        print(f"    [MOVE] Attempting to move from {self.agent_pos} to {new_pos}")
+        if (0 <= new_pos[0] < self.width and 0 <= new_pos[1] < self.height and
+                self.layout_matrix[new_pos[1], new_pos[0]] == 0):
+            self.agent_pos = new_pos
+            print(f"    [MOVE] Success. New position: {self.agent_pos}")
+            return 0
+        else:
+            print(f"    [MOVE] Failed. Wall or out of bounds.")
+            # Belohnung aus Konfiguration verwenden
+            return self.rewards_config['invalid_move_penalty']
+
+    # --- Die restlichen Methoden bleiben unverändert ---
+    # (z.B. _get_obs, _get_rack_locations, _update_popularity, etc.)
     def _get_obs(self):
         obs = [self.agent_pos[0], self.agent_pos[1]]
         obs.append(self.agent_inventory if self.agent_inventory is not None else -1)
@@ -190,80 +207,61 @@ class DynamicWorkshop(gym.Env):
     def _calculate_travel_time_manhattan(self, start, end):
         return abs(start[0] - end[0]) + abs(start[1] - end[1])
 
-    def _generate_item_catalog(self):
-        catalog = {}
-        for i in range(self.num_item_types):
-            rand_val = np.random.rand()
-            if rand_val < 0.2:
-                popularity = np.random.randint(80, self.max_popularity + 1)
-            elif rand_val < 0.5:
-                popularity = np.random.randint(20, 80)
-            else:
-                popularity = np.random.randint(1, 20)
-            catalog[i] = {'id': i, 'popularity': popularity}
-        return catalog
-
     def _initialize_task_queue(self):
-        """
-        Generates a list of random tasks for the episode, ensuring no duplicate pick tasks.
-        """
         self.task_queue = []
-
-        # Get a list of locations that can be picked from at the start
         available_for_picking = list(self.rack_contents.keys())
-        random.shuffle(available_for_picking)  # Randomize the order
-
+        random.shuffle(available_for_picking)
         for _ in range(self.num_initial_tasks):
-            # Decide on task type: 50/50 chance, but only if that type is possible
             can_pick = bool(available_for_picking)
-            # For the initial queue, a PUT task is always considered possible
             can_put = True
-
             task_choice = random.random()
-
-            # Generate a PICK task if possible and chosen, OR if putting is not an option (it always is here, but good practice)
             if task_choice < 0.5 and can_pick:
-                # Pop the location to ensure it's used only once for a pick task
                 rack_pos = available_for_picking.pop()
                 item_id = self.rack_contents[rack_pos]
-                task = {"type": "PICK", "item_id": item_id, "origin": rack_pos}
+                # Wichtig: JSON speichert Listen, wir brauchen Tupel. Hier aber wieder Liste für JSON-Kompatibilität.
+                task = {"type": "PICK", "item_id": item_id, "origin": list(rack_pos)}
                 self.task_queue.append(task)
-
-            # Generate a PUT task
             elif can_put:
                 item_id = random.randint(0, self.num_item_types - 1)
                 task = {"type": "PUT", "item_id": item_id}
                 self.task_queue.append(task)
-
-            # If for some reason no task can be generated, stop.
             else:
                 break
 
-    def _generate_new_task(self):
-        # 50/50 chance of a pick or put task
-        if random.random() < 0.5:  # PICK task
-            if not self.rack_contents: return None
-            rack_pos = random.choice(list(self.rack_contents.keys()))
-            item_id = self.rack_contents[rack_pos]
-            return {"type": "PICK", "item_id": item_id, "origin": rack_pos}
-        else:  # PUT task
-            if len(self.rack_contents) >= self.num_racks: return None
-            item_id = random.randint(0, self.num_item_types - 1)
-            return {"type": "PUT", "item_id": item_id}
+    def plot_popularity_history(self, filepath=None):
+        """
+        Generates and saves a plot of item popularity changes over the episode.
+        """
+        if not self.popularity_history:
+            print("⚠️ Popularity history is empty. Nothing to plot.")
+            return
 
-    def _move_agent(self, action):
-        move_deltas = [(0, -1), (0, 1), (-1, 0), (1, 0)]  # UP, DOWN, LEFT, RIGHT for PyGame
-        dx, dy = move_deltas[action]
-        new_pos = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
-        print(f"    [MOVE] Attempting to move from {self.agent_pos} to {new_pos}")
-        if (0 <= new_pos[0] < self.width and 0 <= new_pos[1] < self.height and
-                self.layout_matrix[new_pos[1], new_pos[0]] == 0):
-            self.agent_pos = new_pos
-            print(f"    [MOVE] Success. New position: {self.agent_pos}")
-            return 0
+        history_array = np.array(self.popularity_history)
+
+        fig, ax = plt.subplots(figsize=(12, 8))
+
+        for i in range(self.num_item_types):
+            ax.plot(history_array[:, i], label=f'Item {i}')
+
+        ax.set_title('Item Popularity Over Episode', fontsize=16)
+        ax.set_xlabel('Time Step', fontsize=12)
+        ax.set_ylabel('Popularity Count', fontsize=12)
+        ax.legend(title='Items')
+        ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+        fig.tight_layout()
+
+        if filepath:
+            try:
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                plt.savefig(filepath)
+                print(f"✅ Popularity graph saved to {filepath}")
+            except Exception as e:
+                print(f"❌ Error saving popularity graph: {e}")
         else:
-            print(f"    [MOVE] Failed. Wall or out of bounds.")
-            return -10
+            plt.show()
+
+        plt.close(fig)
 
     def render(self):
         if self.window is None:
@@ -291,36 +289,32 @@ class DynamicWorkshop(gym.Env):
                                      self.cell_size, self.cell_size))
 
         for rack_pos, item_id in self.rack_contents.items():
-            # Get the popularity of the item
             popularity = self.popularity_counts[item_id]
-
-            # Assign color based on popularity thresholds
             if popularity >= 80:
-                color = (0, 255, 0)  # Green
+                color = (0, 255, 0)
             elif 20 <= popularity < 80:
-                color = (255, 255, 0)  # Yellow
+                color = (255, 255, 0)
             else:
-                color = (255, 0, 0)  # Red
-
-            # Draw the rack rectangle
+                color = (255, 0, 0)
             rect = pygame.Rect(rack_pos[0] * self.cell_size, rack_pos[1] * self.cell_size, self.cell_size,
                                self.cell_size)
             pygame.draw.rect(canvas, color, rect.inflate(-8, -8), border_radius=5)
-
-            # Render the item ID
-            text = self.font.render(f"{item_id}", True, (255, 255, 255))
+            text_color = (0, 0, 0) if color == (255, 255, 0) else (255, 255, 255)
+            text = self.font.render(f"{item_id}", True, text_color)
             canvas.blit(text, text.get_rect(center=rect.center))
 
-        agent_rect = pygame.Rect(self.agent_pos[0] * self.cell_size, self.agent_pos[1] * self.cell_size,
-                                 self.cell_size, self.cell_size)
+        agent_rect = pygame.Rect(self.agent_pos[0] * self.cell_size, self.agent_pos[1] * self.cell_size, self.cell_size,
+                                 self.cell_size)
         pygame.draw.circle(canvas, colors["agent"], agent_rect.center, self.cell_size // 2 - 5)
         if self.agent_inventory is not None:
             pygame.draw.circle(canvas, (255, 255, 255), agent_rect.center, self.cell_size // 4)
 
-        pop_normalized = self.popularity_counts / np.sum(self.popularity_counts)
-        for i in range(self.num_item_types):
-            text = self.font.render(f"Item {i}: {pop_normalized[i]:.1%}", True, (0, 0, 0))
-            canvas.blit(text, (10, 10 + i * 15))
+        pop_sum = np.sum(self.popularity_counts)
+        if pop_sum > 0:
+            pop_normalized = self.popularity_counts / pop_sum
+            for i in range(self.num_item_types):
+                text = self.font.render(f"Item {i}: {pop_normalized[i]:.1%}", True, (0, 0, 0))
+                canvas.blit(text, (10, 10 + i * 15))
         if self.current_task:
             task_str = f"Task: {self.current_task['type']} item {self.current_task['item_id']}"
             if self.current_task['type'] == "PICK": task_str += f" from {self.current_task['origin']}"
@@ -392,95 +386,70 @@ class DynamicWorkshop(gym.Env):
     def close(self):
         if self.window is not None: pygame.display.quit(); pygame.quit()
 
-
 # -------------EVAL---------------
+# (Der Evaluations- und Spiel-Code bleibt größtenteils gleich,
+# außer bei der Instanziierung der Umgebung)
 
 # --- Control Flags ---
-TRAIN_MODELS = False
-EVALUATE_MODEL = True
+TRAIN_MODELS = True
+EVALUATE_MODEL = False
 PLAY_GAME = False
 
-# --- Base directory for all logs and models ---
 base_log_dir = "dqn_workshop_runs"
 
 
 def get_next_run_number(base_log_dir):
-    """Finds the next available run number in a log directory."""
-    if not os.path.exists(base_log_dir):
-        return 1
-
+    if not os.path.exists(base_log_dir): return 1
     existing_runs = [d for d in os.listdir(base_log_dir) if d.startswith("run_")]
-    if not existing_runs:
-        return 1
-
+    if not existing_runs: return 1
     max_run = 0
     for run in existing_runs:
         try:
             num = int(run.split('_')[1])
-            if num > max_run:
-                max_run = num
+            if num > max_run: max_run = num
         except (ValueError, IndexError):
             continue
-
     return max_run + 1
 
 
 if __name__ == '__main__':
 
-    # --- Training ---
+    # Pfad zur Konfigurationsdatei
+    CONFIG_FILE = "two_racks.json"
+
     if TRAIN_MODELS:
-        # --- NEW: Automatically find the next run number and create a unique path ---
         run_number = get_next_run_number(base_log_dir)
         log_dir = os.path.join(base_log_dir, f"run_{run_number}")
         model_path = os.path.join(log_dir, "dqn_workshop_agent.zip")
         os.makedirs(log_dir, exist_ok=True)
         print(f"--- Starting new training run #{run_number} ---")
 
-        env_dqn = Monitor(DynamicWorkshop(), filename=log_dir)
+        # *** MODIFIZIERT: Übergabe des Konfigurationspfads ***
+        env_dqn = Monitor(DynamicWorkshop(config_path=CONFIG_FILE), filename=log_dir)
         train_env_dqn = DummyVecEnv([lambda: env_dqn])
         policy_kwargs = dict(net_arch=[128, 64, 32])
 
-        model_dqn = DQN(
-            "MlpPolicy",
-            train_env_dqn,
-            verbose=1,
-            buffer_size=50000,
-            learning_starts=1000,
-            batch_size=32,
-            exploration_fraction=0.9,
-            exploration_final_eps=0.67,
-            tensorboard_log=log_dir,
-            policy_kwargs=policy_kwargs
-        )
+        model_dqn = DQN("MlpPolicy", train_env_dqn, verbose=1, buffer_size=50000,
+                        learning_starts=1000, batch_size=32, exploration_fraction=0.9,
+                        exploration_final_eps=0.67, tensorboard_log=log_dir, policy_kwargs=policy_kwargs)
+
         print("--- Starting DQN Training... ---")
-        model_dqn.learn(total_timesteps=5000000)
+        model_dqn.learn(total_timesteps=1000000)
         model_dqn.save(model_path)
         print(f"--- DQN Training finished. Model saved to {model_path} ---")
 
-    # --- Evaluation or Game Mode ---
     else:
         if EVALUATE_MODEL:
-            # --- Specify which trained model you want to load ---
-            run_to_load = 24  # <--- CHANGE THIS NUMBER TO THE RUN YOU WANT TO EVALUATE
-
+            run_to_load = 24
             model_path = os.path.join(base_log_dir, f"run_{run_to_load}", "dqn_workshop_agent.zip")
 
             if not os.path.exists(model_path):
                 print(f"Error: Model not found at {model_path}")
-                print("Please make sure you have trained a model for that run number.")
-
-            elif EVALUATE_MODEL:
+            else:
                 print(f"--- STARTING EVALUATION OF MODEL: {model_path} ---")
-
-                # 1. Create the evaluation environment
-                # We use the same environment class the model was trained on
-                eval_env = DynamicWorkshop()
-
-                # 2. Load the trained model
+                eval_env = DynamicWorkshop(config_path=CONFIG_FILE)
                 model = DQN.load(model_path, env=eval_env)
-
-                # 3. Run the evaluation loop
-                eval_episodes = 10
+                eval_episodes = 20
                 episode_rewards = []
 
                 for episode in range(eval_episodes):
@@ -489,41 +458,38 @@ if __name__ == '__main__':
                     current_episode_reward = 0
 
                     while not done:
-                        # Use the model to predict the best action (deterministic=True)
                         action, _ = model.predict(obs, deterministic=True)
-
-                        # Take the action in the environment
                         obs, reward, terminated, truncated, info = eval_env.step(action)
                         done = terminated or truncated
-
-                        # Add the reward to the total for this episode
                         current_episode_reward += reward
-
-                        # Render the environment to watch the agent
                         eval_env.render()
 
-                    image_path = os.path.join("dqn_dynamic_layout", f"episode_{episode + 1}_final_state.png")
+                    # *** NEW: Generate and save the popularity plot after the episode ends ***
+                    output_dir = "dqn_dynamic_layout"
+                    graph_path = os.path.join(output_dir, f"episode_{episode + 1}_popularity.png")
+                    eval_env.plot_popularity_history(filepath=graph_path)
+
+                    image_path = os.path.join(output_dir, f"episode_{episode + 1}_final_state.png")
                     eval_env.save_episode_render(image_path)
 
                     print(f"Episode {episode + 1}/{eval_episodes} | Reward: {current_episode_reward:.2f}")
                     episode_rewards.append(current_episode_reward)
 
-                # 4. Calculate and print summary statistics
                 mean_reward = np.mean(episode_rewards)
                 std_reward = np.std(episode_rewards)
                 print("\n--- EVALUATION COMPLETE ---")
                 print(f"Average reward over {eval_episodes} episodes: {mean_reward:.2f} +/- {std_reward:.2f}")
 
                 eval_env.close()
+
         elif PLAY_GAME:
-            run_to_load = 21  # <--- CHANGE THIS NUMBER TO THE RUN YOU WANT TO EVALUATE
-
+            run_to_load = 24
             model_path = os.path.join(base_log_dir, f"run_{run_to_load}", "dqn_workshop_agent.zip")
-
             print(f"--- STARTING GAME MODE WITH MODEL: {model_path} ---")
-            game_env = DynamicWorkshop()
+            # *** MODIFIZIERT: Übergabe des Konfigurationspfads ***
+            game_env = DynamicWorkshop(config_path=CONFIG_FILE)
             model = DQN.load(model_path, env=game_env)
-
+            # (restlicher Spiel-Code bleibt gleich)
             running = True
             while running:
                 obs, _ = game_env.reset()
@@ -538,46 +504,33 @@ if __name__ == '__main__':
 
                 while not done:
                     game_env.render()
-
-                    # --- Wait for user input to proceed ---
                     action_taken = False
                     while not action_taken:
                         for event in pygame.event.get():
-                            # Handle window close
                             if event.type == pygame.QUIT:
                                 done = True
                                 running = False
                                 action_taken = True
-                            # Handle key presses
                             if event.type == pygame.KEYDOWN:
-                                # Reset episode
                                 if event.key == pygame.K_r:
-                                    print("\n--- [R] key pressed. Resetting episode. ---")
                                     done = True
                                     action_taken = True
-                                # Advance one step
                                 if event.key == pygame.K_SPACE:
                                     action_taken = True
-
-                    # If the loop was broken by quitting or resetting, skip the AI step
                     if not running or done:
                         continue
-
-                    # --- AI takes one step ---
                     action, _ = model.predict(obs, deterministic=True)
-                    action_int = action.item()  # Get integer from numpy array
+                    action_int = action.item()
                     action_str = game_env.ACTION_MAP.get(action_int, f"UNKNOWN({action_int})")
                     print(f"\nModel chose action: {action_int} [{action_str}]")
-
                     obs, reward, terminated, truncated, info = game_env.step(action_int)
                     done = terminated or truncated
                     total_reward += reward
-
                     print(f"  -> Reward for this step: {reward:.2f}")
                     print(f"  -> Total Episode Reward: {total_reward:.2f}")
-
                     if done:
+                        output_dir = "dqn_dynamic_layout"
+                        graph_path = os.path.join(output_dir, f"episode_game_popularity.png")
+                        game_env.plot_popularity_history(filepath=graph_path)
                         print(f"\n--- ✅ EPISODE FINISHED --- Final Reward: {total_reward:.2f}")
-
-            print("--- Exiting Game Mode. ---")
             game_env.close()

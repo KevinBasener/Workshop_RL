@@ -43,6 +43,7 @@ class WorkshopEnv(gym.Env):
         self.agent_pos = None
         self.agent_inventory = None
         self.num_items = self.num_racks
+        self.font = None
         self.max_popularity = 100
         self.item_catalog = self._generate_item_catalog() if item_catalog is None else item_catalog
 
@@ -175,96 +176,194 @@ class WorkshopEnv(gym.Env):
 
         return self._get_obs(), reward, terminated, False, {}
 
-    def render(self):
-        """Renders the environment using PyGame with ABC labels on items."""
-        if self.render_mode is None:
-            gym.logger.warn("You are calling render method without specifying any render mode.")
-            return
+    def render_to_file(self, folder_path="rendered_episodes"):
+        """
+        Renders the environment with a professional aesthetic and saves it to a file.
+        """
+        # --- Create the folder if it doesn't exist ---
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
 
-        # Initialize PyGame window, clock, and font if they don't exist
-        if self.window is None and self.render_mode == "human":
+        # --- Initialization (Headless Mode) ---
+        # Initialize PyGame without a visible window for saving files
+        if self.window is None:
             pygame.init()
             pygame.display.init()
-            self.window = pygame.display.set_mode(self.window_size)
-            pygame.display.set_caption("Workshop Warehouse Simulation")
-        if self.clock is None and self.render_mode == "human":
-            self.clock = pygame.time.Clock()
+            # Using pygame.HIDDEN prevents a window from appearing
+            self.window = pygame.display.set_mode(self.window_size, pygame.HIDDEN)
+        if self.font is None:
+            pygame.font.init()
+            self.font = pygame.font.SysFont("sans-serif", 24, bold=True)
+            self.font_small = pygame.font.SysFont("sans-serif", 16)
 
-        canvas = pygame.Surface(self.window_size)
-        canvas.fill((255, 255, 255))  # White background
-
-        # --- Draw all elements ---
-        colors = {
-            "aisle": (200, 200, 200),
-            "rack": (100, 100, 100),
-            "staging": (255, 255, 0),
-            "agent": (0, 0, 255),
-            "item_A": (255, 0, 0),
-            "item_B": (0, 255, 0),
-            "item_C": (255, 165, 0),
+        # --- Professional Color Palette (Copied from render method) ---
+        COLORS = {
+            "background": (248, 249, 250),
+            "grid": (222, 226, 230),
+            "rack": (208, 212, 216),
+            "rack_outline": (173, 181, 189),
+            "staging": (255, 236, 179),
+            "staging_outline": (253, 126, 20),
+            "agent": (0, 123, 255),
+            "agent_outline": (0, 86, 179),
+            "item_A": (0, 255, 0),
+            "item_B": (255, 255, 0),
+            "item_C": (255, 0, 0),
+            "text_dark": (33, 37, 41),
+            "text_light": (248, 249, 250),
         }
 
-        # Draw aisles and racks
+        canvas = pygame.Surface(self.window_size)
+        canvas.fill(COLORS["background"])
+
+        # --- Draw Grid and Layout ---
         for y in range(self.height):
             for x in range(self.width):
                 rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
-                if self.layout_matrix[y, x] == 0:
-                    pygame.draw.rect(canvas, colors["aisle"], rect)
-                else:
-                    pygame.draw.rect(canvas, colors["rack"], rect)
+                if self.layout_matrix[y, x] == 1:
+                    pygame.draw.rect(canvas, COLORS["rack"], rect)
+                    pygame.draw.rect(canvas, COLORS["rack_outline"], rect, 2)
+                pygame.draw.rect(canvas, COLORS["grid"], rect, 1)
 
-        # Draw items in racks
+        # --- Draw Items in Racks ---
         for rack_pos, item_id in self.rack_contents.items():
             pop = self.item_catalog[item_id]['popularity']
             item_class = 'A' if pop >= 80 else 'B' if pop >= 20 else 'C'
-            color = colors[f"item_{item_class}"]
-            rect = pygame.Rect(rack_pos[0] * self.cell_size, rack_pos[1] * self.cell_size, self.cell_size,
-                               self.cell_size)
-            pygame.draw.rect(canvas, color, rect, border_radius=5)
-
-            # --- ADDED: Render the class letter on top ---
-            text_surf = pygame.font.SysFont("Arial", size=36).render(item_class, True, (255, 255, 255))  # White text
-            text_rect = text_surf.get_rect(center=rect.center)
+            color = COLORS[f"item_{item_class}"]
+            item_rect = pygame.Rect(rack_pos[0] * self.cell_size + 5, rack_pos[1] * self.cell_size + 5,
+                                    self.cell_size - 10, self.cell_size - 10)
+            pygame.draw.rect(canvas, color, item_rect, border_radius=5)
+            text_surf = self.font.render(item_class, True, COLORS["text_light"])
+            text_rect = text_surf.get_rect(center=item_rect.center)
             canvas.blit(text_surf, text_rect)
 
-        # Draw staging area
-        rect = pygame.Rect(self.staging_area_pos[0] * self.cell_size, self.staging_area_pos[1] * self.cell_size,
-                           self.cell_size, self.cell_size)
-        pygame.draw.rect(canvas, colors["staging"], rect)
+        # --- Draw Staging Area ---
+        staging_rect = pygame.Rect(self.staging_area_pos[0] * self.cell_size, self.staging_area_pos[1] * self.cell_size,
+                                   self.cell_size, self.cell_size)
+        pygame.draw.rect(canvas, COLORS["staging"], staging_rect)
+        pygame.draw.rect(canvas, COLORS["staging_outline"], staging_rect, 3)
         if self.staging_area_queue:
-            # Render the next item ID in the staging area
-            text = pygame.font.SysFont("Arial", size=36).render(f"S:{self.staging_area_queue[0]}", True,
-                                                                (0, 0, 0))  # Black text
-            canvas.blit(text, text.get_rect(center=rect.center))
+            text_surf = self.font_small.render(f"Next: {self.staging_area_queue[0]}", True, COLORS["text_dark"])
+            text_rect = text_surf.get_rect(center=staging_rect.center)
+            canvas.blit(text_surf, text_rect)
 
-        # Draw agent
-        agent_rect = pygame.Rect(self.agent_pos[0] * self.cell_size, self.agent_pos[1] * self.cell_size, self.cell_size,
-                                 self.cell_size)
-        pygame.draw.circle(canvas, colors["agent"], agent_rect.center, self.cell_size // 2)
+        # --- Draw Agent ---
+        agent_center = (int(self.agent_pos[0] * self.cell_size + self.cell_size / 2),
+                        int(self.agent_pos[1] * self.cell_size + self.cell_size / 2))
+        agent_radius = self.cell_size // 2 - 8
+        pygame.draw.circle(canvas, COLORS["agent_outline"], agent_center, agent_radius)
+        pygame.draw.circle(canvas, COLORS["agent"], agent_center, agent_radius - 2)
 
         # Draw item carried by agent
         if self.agent_inventory is not None:
             pop = self.item_catalog[self.agent_inventory]['popularity']
             item_class = 'A' if pop >= 80 else 'B' if pop >= 20 else 'C'
-            color = colors[f"item_{item_class}"]
-            pygame.draw.circle(canvas, color, agent_rect.center, self.cell_size // 4)
+            item_color = COLORS[f"item_{item_class}"]
+            pygame.draw.circle(canvas, item_color, agent_center, self.cell_size // 4)
+            pygame.draw.circle(canvas, COLORS["background"], agent_center, self.cell_size // 4, 2)
 
-            # --- ADDED: Render the class letter on the carried item ---
-            text_surf = pygame.font.SysFont("Arial", size=36).render(item_class, True,
-                                                                     (0, 0, 0))  # Black text for contrast
-            text_rect = text_surf.get_rect(center=agent_rect.center)
+        # --- Save the canvas to a file ---
+        # Use a unique name for each step to avoid overwriting
+        step_filename = os.path.join(folder_path, f"step_{pygame.time.get_ticks()}.png")
+        pygame.image.save(canvas, step_filename)
+        print(f"Saved step to {step_filename}")
+
+    def render(self):
+        """Renders the environment with a clean, professional aesthetic."""
+        if self.render_mode is None:
+            gym.logger.warn("You are calling render method without specifying any render mode.")
+            return
+
+        # --- Initialization ---
+        if self.window is None and self.render_mode == "human":
+            pygame.init()
+            pygame.display.init()
+            self.window = pygame.display.set_mode(self.window_size)
+            pygame.display.set_caption("Warehouse Simulation")
+        if self.clock is None and self.render_mode == "human":
+            self.clock = pygame.time.Clock()
+        if self.font is None:
+            pygame.font.init()
+            self.font = pygame.font.SysFont("sans-serif", 24, bold=True)
+            self.font_small = pygame.font.SysFont("sans-serif", 16)
+
+        # --- Professional Color Palette ---
+        COLORS = {
+            "background": (248, 249, 250),
+            "grid": (222, 226, 230),
+            "rack": (208, 212, 216),
+            "rack_outline": (173, 181, 189),
+            "staging": (255, 236, 179),
+            "staging_outline": (253, 126, 20),
+            "agent": (0, 123, 255),
+            "agent_outline": (0, 86, 179),
+            "item_A": (0, 255, 0),
+            "item_B": (255, 255, 0),
+            "item_C": (255, 0, 0),
+            "text_dark": (33, 37, 41),
+            "text_light": (248, 249, 250),
+        }
+
+        canvas = pygame.Surface(self.window_size)
+        canvas.fill(COLORS["background"])
+
+        # --- Draw Grid and Layout ---
+        for y in range(self.height):
+            for x in range(self.width):
+                rect = pygame.Rect(x * self.cell_size, y * self.cell_size, self.cell_size, self.cell_size)
+                # Draw rack
+                if self.layout_matrix[y, x] == 1:
+                    pygame.draw.rect(canvas, COLORS["rack"], rect)
+                    pygame.draw.rect(canvas, COLORS["rack_outline"], rect, 2)
+                # Draw grid lines for the entire area
+                pygame.draw.rect(canvas, COLORS["grid"], rect, 1)
+
+        # --- Draw Items in Racks ---
+        for rack_pos, item_id in self.rack_contents.items():
+            pop = self.item_catalog[item_id]['popularity']
+            item_class = 'A' if pop >= 80 else 'B' if pop >= 20 else 'C'
+            color = COLORS[f"item_{item_class}"]
+            item_rect = pygame.Rect(rack_pos[0] * self.cell_size + 5, rack_pos[1] * self.cell_size + 5,
+                                    self.cell_size - 10, self.cell_size - 10)
+            pygame.draw.rect(canvas, color, item_rect, border_radius=5)
+
+            text_surf = self.font.render(item_class, True, COLORS["text_light"])
+            text_rect = text_surf.get_rect(center=item_rect.center)
             canvas.blit(text_surf, text_rect)
 
+        # --- Draw Staging Area ---
+        staging_rect = pygame.Rect(self.staging_area_pos[0] * self.cell_size, self.staging_area_pos[1] * self.cell_size,
+                                   self.cell_size, self.cell_size)
+        pygame.draw.rect(canvas, COLORS["staging"], staging_rect)
+        pygame.draw.rect(canvas, COLORS["staging_outline"], staging_rect, 3)
+        if self.staging_area_queue:
+            text_surf = self.font_small.render(f"Next: {self.staging_area_queue[0]}", True, COLORS["text_dark"])
+            text_rect = text_surf.get_rect(center=staging_rect.center)
+            canvas.blit(text_surf, text_rect)
+
+        # --- Draw Agent ---
+        agent_center = (int(self.agent_pos[0] * self.cell_size + self.cell_size / 2),
+                        int(self.agent_pos[1] * self.cell_size + self.cell_size / 2))
+        agent_radius = self.cell_size // 2 - 8
+        pygame.draw.circle(canvas, COLORS["agent_outline"], agent_center, agent_radius)
+        pygame.draw.circle(canvas, COLORS["agent"], agent_center, agent_radius - 2)
+
+        # Draw item carried by agent
+        if self.agent_inventory is not None:
+            pop = self.item_catalog[self.agent_inventory]['popularity']
+            item_class = 'A' if pop >= 80 else 'B' if pop >= 20 else 'C'
+            item_color = COLORS[f"item_{item_class}"]
+            pygame.draw.circle(canvas, item_color, agent_center, self.cell_size // 4)
+            pygame.draw.circle(canvas, COLORS["background"], agent_center, self.cell_size // 4, 2)
+
+        # --- Update Display ---
         if self.render_mode == "human":
-            # The screen window shows what is drawn on the canvas
             self.window.blit(canvas, canvas.get_rect())
             pygame.event.pump()
             pygame.display.update()
             self.clock.tick(self.metadata["render_fps"])
         else:  # rgb_array
-            return np.transpose(
-                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
-            )
+            return np.transpose(np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2))
 
     def close(self):
         """Properly close the PyGame window."""
@@ -384,7 +483,7 @@ if __name__ == '__main__':
                 total_reward += reward
                 done = terminated or truncated
                 eval_env.render()
-            sleep(5)
+            eval_env.render_to_file(folder_path=f"evaluation_steps/dqn_episode")
             dqn_rewards.append(total_reward)
             eval_env.close()
 

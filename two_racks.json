@@ -1,0 +1,44 @@
+{
+  "environment": {
+    "width": 7,
+    "height": 9,
+    "io_point": [3, 4],
+    "layout_matrix": [
+      [0, 0, 0, 0, 0, 0, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 1, 1, 0, 1, 1, 0],
+      [0, 0, 0, 0, 0, 0, 0]
+    ]
+  },
+  "simulation": {
+    "num_initial_tasks": 20,
+    "render_fps": 10
+  },
+  "rewards": {
+    "step_penalty": -1,
+    "invalid_move_penalty": -10,
+    "failed_put_penalty": -10,
+    "put_score_multiplier": 100,
+    "pick_score_multiplier": 5,
+    "completion_bonus": 500
+  },
+  "items": {
+    "item_catalog": [
+      { "id": 0, "popularity": 98 },
+      { "id": 1, "popularity": 85 },
+      { "id": 2, "popularity": 75 },
+      { "id": 3, "popularity": 52 },
+      { "id": 4, "popularity": 30 },
+      { "id": 5, "popularity": 18 },
+      { "id": 6, "popularity": 15 },
+      { "id": 7, "popularity": 11 },
+      { "id": 8, "popularity": 6  },
+      { "id": 9, "popularity": 2  }
+    ]
+  }
+}
