@@ -2,13 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def generate_cost_heatmap(width=20, height=10):
+def generate_cost_heatmap(width=10, height=10):
     """
     Generiert und speichert eine Heatmap der Manhattan-Distanzkosten
     für ein gegebenes Lagerlayout, ohne abgeschnittene Ränder.
     """
     # 1. Definition des Lagerlayouts und des I/O-Punktes
-    io_point = (width // 2, 0)
+    io_point = (0, 0)
 
     # 2. Erstellung eines Kosten-Gitters
     cost_grid = np.zeros((height, width))
@@ -34,7 +34,7 @@ def generate_cost_heatmap(width=20, height=10):
             ax.text(x, y, text, ha='center', va='center', color=color, fontsize=8, weight=weight)
 
     # 6. Hinzufügen einer Farblegende und Titel
-    fig.colorbar(cax, ax=ax, label='Kosten (Manhattan-Distanz)')
+    fig.colorbar(cax, ax=ax, label='Kosten (Manhattan-Distanz)', orientation='horizontal')
     ax.set_title('Kostenverteilung der Wegstrecke zum I/O-Punkt', fontsize=14, pad=20)
     ax.set_xticks(np.arange(width))
     ax.set_yticks(np.arange(height))
@@ -57,4 +57,4 @@ def generate_cost_heatmap(width=20, height=10):
 
 # --- Hauptskript ausführen ---
 if __name__ == '__main__':
-    generate_cost_heatmap(width=9, height=5)
+    generate_cost_heatmap(width=5, height=9)

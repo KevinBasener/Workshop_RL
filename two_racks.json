@@ -16,15 +16,16 @@
     ]
   },
   "simulation": {
-    "num_initial_tasks": 20,
-    "render_fps": 10
+    "num_initial_tasks": 10,
+    "render_fps": 10,
+    "max_episode_steps": 1000
   },
   "rewards": {
     "step_penalty": -1,
     "invalid_move_penalty": -10,
     "failed_put_penalty": -10,
-    "put_score_multiplier": 100,
-    "pick_score_multiplier": 5,
+    "put_score_multiplier": 200,
+    "pick_score_multiplier": 0,
     "completion_bonus": 500
   },
   "items": {
