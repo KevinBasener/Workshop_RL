@@ -517,8 +517,8 @@ class DynamicWorkshop(gym.Env):
 # außer bei der Instanziierung der Umgebung)
 
 # --- Control Flags ---
-TRAIN_MODELS = True
-EVALUATE_MODEL = False
+TRAIN_MODELS = False
+EVALUATE_MODEL = True
 PLAY_GAME = False
 
 base_log_dir = "dqn_workshop_runs"
@@ -568,7 +568,7 @@ if __name__ == '__main__':
 
     else:
         if EVALUATE_MODEL:
-            run_to_load = 55  # Passe die Nummer des zu ladenden Modells an
+            run_to_load = 56  # Passe die Nummer des zu ladenden Modells an
             model_path = os.path.join(base_log_dir, f"run_{run_to_load}", "dqn_workshop_agent.zip")
 
             if not os.path.exists(model_path):
@@ -619,7 +619,7 @@ if __name__ == '__main__':
                 eval_env.close()
 
         elif PLAY_GAME:
-            run_to_load = 55  # Passe die Nummer des zu ladenden Modells an
+            run_to_load = 56  # Passe die Nummer des zu ladenden Modells an
             model_path = os.path.join(base_log_dir, f"run_{run_to_load}", "dqn_workshop_agent.zip")
             print(f"--- STARTING GAME MODE WITH MODEL: {model_path} ---")
 

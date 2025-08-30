@@ -1,6 +1,7 @@
 import os
 import json  # Hinzugefügt
 import gymnasium as gym
+import pandas as pd
 from gymnasium import spaces
 from matplotlib import pyplot as plt
 import numpy as np
@@ -10,6 +11,35 @@ import random
 from stable_baselines3 import PPO, DQN
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
+
+def load_and_prepare_logs_for_rl(log_path="werkstattlager_logs.csv"):
+    try:
+        df = pd.read_csv(log_path)
+    except FileNotFoundError:
+        print(f"Fehler: Log-Datei '{log_path}' nicht gefunden.")
+        return None, None
+
+    # Popularität und Item-Katalog erstellen
+    demand_df = df[df['TransactionType'] == 'MATERIALENTNAHME']
+    popularity_counts = demand_df['SKU'].value_counts()
+
+    item_catalog = {}
+    sku_to_id_map = {sku: i for i, sku in enumerate(df['SKU'].unique())}
+    id_to_sku_map = {i: sku for sku, i in sku_to_id_map.items()}
+
+    for i, sku in id_to_sku_map.items():
+        item_catalog[i] = {'id': i, 'name': sku, 'popularity': popularity_counts.get(sku, 0)}
+
+    # Task-Liste mit Mengen erstellen
+    task_queue = []
+    for _, row in df.sort_values(by="Timestamp").iterrows():
+        task_type = "PUT" if row['TransactionType'] == 'WARENEINGANG' else "PICK"
+        item_id = sku_to_id_map[row['SKU']]
+        quantity = abs(row['Quantity'])
+        # Füge eine Aufgabe pro Transaktion hinzu, nicht pro Stück
+        task_queue.append({'type': task_type, 'item_id': item_id, 'quantity': quantity})
+
+    return item_catalog, task_queue
 
 
 class DynamicWorkshop(gym.Env):
