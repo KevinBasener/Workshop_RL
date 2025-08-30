@@ -4,10 +4,6 @@ import random
 import sys
 import pandas as pd
 
-# <<< NEU: Globale Kapazität pro Lagerplatz >>>
-LOCATION_CAPACITY = 50
-
-
 class CostTracker:
     """Berechnet und speichert die operativen Kosten (Wegstrecken)."""
 
@@ -102,18 +98,23 @@ class WarehouseVisualizer:
             item_id, quantity = data['sku'], data['quantity']
             item_class = self.item_classes.get(item_id, "C")
             item_color = self.COLORS[f"item_{item_class}"]
-            fill_ratio = quantity / LOCATION_CAPACITY
-            base_rect = pygame.Rect(x * self.cell_size + 5, y * self.cell_size + 5, self.cell_size - 10,
+
+            # Draw a single, solid rectangle for the item, not a variable-height bar.
+            item_rect = pygame.Rect(x * self.cell_size + 5, y * self.cell_size + 5, self.cell_size - 10,
                                     self.cell_size - 10)
-            fill_height = (self.cell_size - 10) * fill_ratio
-            fill_rect = pygame.Rect(base_rect.left, base_rect.bottom - fill_height, base_rect.width, fill_height)
-            pygame.draw.rect(self.screen, item_color, fill_rect)
+            pygame.draw.rect(self.screen, item_color, item_rect)
+
+            # Abbreviate the item ID for cleaner display
             display_id = str(item_id).replace("SCHRAUBE-", "S-").replace("KABELBINDER-", "K-").replace("KUGELLAGER-",
                                                                                                        "L-")
+
+            # Render text for the SKU and the quantity
             sku_surf = self.font_small.render(display_id, True, self.COLORS["background"])
-            qty_surf = self.font_small.render(f"{quantity}/{LOCATION_CAPACITY}", True, self.COLORS["background"])
-            self.screen.blit(sku_surf, sku_surf.get_rect(center=(base_rect.centerx, base_rect.centery - 8)))
-            self.screen.blit(qty_surf, qty_surf.get_rect(center=(base_rect.centerx, base_rect.centery + 8)))
+            qty_surf = self.font_small.render(f"Qty: {quantity}", True, self.COLORS["background"])
+
+            # Position the text inside the colored rectangle
+            self.screen.blit(sku_surf, sku_surf.get_rect(center=(item_rect.centerx, item_rect.centery - 8)))
+            self.screen.blit(qty_surf, qty_surf.get_rect(center=(item_rect.centerx, item_rect.centery + 8)))
 
     def wait_for_quit(self):
         waiting = True
@@ -163,50 +164,29 @@ class ABCAgent:
 
     # <<< GEÄNDERT: Komplett neue Einlagerungslogik >>>
     def find_storage_for_batch(self, item_id, quantity_to_store, occupied_locations):
-        """Findet Lagerplätze für eine ganze Charge und gibt einen Einlagerungsplan zurück."""
+        """Finds a single best location for an item, assuming infinite capacity."""
         storage_plan = []
 
         # 1. Priorität: Bestehende Plätze mit demselben Artikel auffüllen
-        possible_locations = [loc for loc, data in occupied_locations.items() if
-                              data['sku'] == item_id and data['quantity'] < LOCATION_CAPACITY]
-        possible_locations.sort(key=lambda loc: self.travel_times[loc])  # Nächstgelegene zuerst
-
-        for loc in possible_locations:
-            if quantity_to_store == 0: break
-            free_space = LOCATION_CAPACITY - occupied_locations[loc]['quantity']
-            add_qty = min(quantity_to_store, free_space)
-            storage_plan.append({'location': loc, 'add_quantity': add_qty})
-            quantity_to_store -= add_qty
-
-        if quantity_to_store == 0:
+        possible_locations = [loc for loc, data in occupied_locations.items() if data['sku'] == item_id]
+        if possible_locations:
+            closest_loc = min(possible_locations, key=lambda loc: self.travel_times[loc])
+            storage_plan.append({'location': closest_loc, 'add_quantity': quantity_to_store})
             return storage_plan
 
         # 2. Priorität: Neue, leere Plätze in bevorzugten Zonen suchen
         item_class = self.item_classes.get(item_id, "C")
-        preferred_zones = []
-        if item_class == "A":
-            preferred_zones = ["A", "B", "C"]
-        elif item_class == "B":
-            preferred_zones = ["B", "C", "A"]
-        else:
-            preferred_zones = ["C", "B", "A"]
+        preferred_zones = {"A": ["A", "B", "C"], "B": ["B", "C", "A"], "C": ["C", "B", "A"]}[item_class]
 
         for zone_key in preferred_zones:
-            if quantity_to_store == 0: break
             available_in_zone = [loc for loc in self.zones[zone_key] if loc not in occupied_locations]
-            available_in_zone.sort(key=lambda loc: self.travel_times[loc])  # Nächstgelegene zuerst
+            if available_in_zone:
+                closest_loc = min(available_in_zone, key=lambda loc: self.travel_times[loc])
+                storage_plan.append({'location': closest_loc, 'new_sku': item_id, 'add_quantity': quantity_to_store})
+                return storage_plan
 
-            for loc in available_in_zone:
-                if quantity_to_store == 0: break
-                add_qty = min(quantity_to_store, LOCATION_CAPACITY)
-                storage_plan.append({'location': loc, 'new_sku': item_id, 'add_quantity': add_qty})
-                quantity_to_store -= add_qty
-
-        if quantity_to_store > 0:
-            print(f"WARNUNG: Kein Platz für {quantity_to_store} Stk. von {item_id} gefunden!")
-
+        print(f"WARNUNG: Kein Platz für {quantity_to_store} Stk. von {item_id} gefunden!")
         return storage_plan
-
 
 def prepare_data_from_logs(filename="werkstattlager_logs.csv"):
     try:
@@ -241,25 +221,18 @@ if __name__ == '__main__':
     # <<< NEU: CostTracker initialisieren >>>
     cost_tracker = CostTracker(abc_agent.travel_times)
 
-    occupied = {}
+    abc_agent = ABCAgent(layout_matrix=layout, io_point=io_point, item_catalog=item_catalog)
+    # visualizer = ... (Can be removed if not needed)
 
-    visualizer.draw(occupied, "Simulation startet...", cost_tracker.get_total_cost())
-    pygame.time.wait(1500)
+    occupied = {}
+    total_picking_cost = 0
 
     for trans in transactions:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
-
         item_id, quantity = trans['SKU'], trans['Quantity']
-        action_info = ""
 
         if trans['TransactionType'] == 'WARENEINGANG':
-            action_info = f"Einlagerung: {quantity}x {item_id}"
             plan = abc_agent.find_storage_for_batch(item_id, quantity, occupied)
-
-            # <<< NEU: Kosten für Einlagerung erfassen >>>
-            cost_tracker.record_putaway_costs(plan)
-
+            # PUTAWAY COSTS ARE NOT RECORDED
             for step in plan:
                 loc, add = step['location'], step['add_quantity']
                 if loc in occupied:
@@ -269,21 +242,16 @@ if __name__ == '__main__':
 
         elif trans['TransactionType'] == 'MATERIALENTNAHME':
             quantity_to_pick = abs(quantity)
-            action_info = f"Entnahme: {quantity_to_pick}x {item_id}"
-
             locations_of_item = [loc for loc, data in occupied.items() if data['sku'] == item_id]
             locations_of_item.sort(key=lambda l: abc_agent.travel_times[l])
 
-            # <<< NEU: Besuchte Orte für Kostenberechnung sammeln >>>
-            locations_visited_for_this_pick = []
+            locations_visited_for_this_pick = set()
 
-            if not locations_of_item:
-                action_info = f"FEHLER: {item_id} nicht auf Lager!"
-            else:
+            if locations_of_item:
                 for loc in locations_of_item:
                     if quantity_to_pick == 0: break
+                    locations_visited_for_this_pick.add(loc)
 
-                    locations_visited_for_this_pick.append(loc)
                     available_qty = occupied[loc]['quantity']
                     pick_qty = min(quantity_to_pick, available_qty)
 
@@ -293,19 +261,11 @@ if __name__ == '__main__':
                     if occupied[loc]['quantity'] == 0:
                         del occupied[loc]
 
-            # <<< NEU: Kosten für Entnahme erfassen >>>
-            cost_tracker.record_picking_costs(locations_visited_for_this_pick)
+            # PICKING COSTS ARE RECORDED
+            for loc in locations_visited_for_this_pick:
+                total_picking_cost += abc_agent.travel_times.get(loc, 0)
 
-        # <<< GEÄNDERT: Gesamtkosten an Visualizer übergeben >>>
-        visualizer.draw(occupied, action_info, cost_tracker.get_total_cost())
-        pygame.time.wait(100)  # Beschleunigt für schnellere Analyse
-
-    # <<< NEU: Finale Kostenausgabe >>>
-    final_cost = cost_tracker.get_total_cost()
     print("\n" + "=" * 30)
     print(f"Simulation abgeschlossen!")
-    print(f"FINALE GESAMTKOSTEN: {final_cost}")
+    print(f"FINALE PICKING-KOSTEN: {total_picking_cost}")
     print("=" * 30)
-
-    visualizer.draw(occupied, f"ENDE! Finale Kosten: {final_cost}", final_cost)
-    visualizer.wait_for_quit()

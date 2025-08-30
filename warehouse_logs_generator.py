@@ -6,16 +6,16 @@ from datetime import datetime, timedelta
 # --- KONFIGURATION ---
 NUM_ROWS = 500  # Reduzierte Anzahl für ein kleineres Lager
 START_DATE = datetime(2025, 8, 4, 7, 30, 0)  # Angepasste Startzeit (Schichtbeginn)
-FILENAME = "werkstattlager_logs.csv"
+FILENAME = "werkstattlager_logs_changed_pop.csv"
 
 # --- STAMMDATEN FÜR WERKSTATTLAGER (10 ARTIKEL) ---
 # Simuliert das Pareto-Prinzip für typische Werkstattartikel
 # A-Artikel (Verbrauchsmaterial, 2 SKUs, 70% der Bewegungen)
-fast_movers = ["SCHRAUBE-M8x40", "KABELBINDER-200mm"]
+fast_movers = ["SCHRAUBE-M8x40", "KABELBINDER-200mm", "KUGELLAGER-6204-2RS",  "FILTER-LUFT-A45"]
 # B-Artikel (Regelmäßige Ersatzteile, 3 SKUs, 25% der Bewegungen)
-medium_movers = ["KUGELLAGER-6204-2RS", "FILTER-LUFT-A45", "SICHERUNG-10A"]
+medium_movers = ["SICHERUNG-10A", "MOTOR-KEILRIEMEN-XPA", "SENSOR-DRUCK-P20"]
 # C-Artikel (Selten benötigte Teile, 5 SKUs, 5% der Bewegungen)
-slow_movers = ["MOTOR-KEILRIEMEN-XPA", "SENSOR-DRUCK-P20", "DICHTUNG-GUMMI-S12", "RELAIS-12V-KFZ",
+slow_movers = ["DICHTUNG-GUMMI-S12", "RELAIS-12V-KFZ",
                "BREMSFLUESSIGKEIT-DOT4"]
 
 ALL_SKUS = fast_movers + medium_movers + slow_movers

@@ -1,464 +1,429 @@
 import os
-
 import gymnasium as gym
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Any
+import heapq
+from typing import Optional, Dict, Any, Tuple, List
+from datetime import datetime
+
+import pygame
+# Import the pathfinding library
+from pathfinding.core.grid import Grid
+from pathfinding.finder.a_star import AStarFinder
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.logger import configure
+
+from ABC import ABCAgent, WarehouseVisualizer
 
 
 class WarehouseEnv(gym.Env):
     """
-    A custom Gymnasium environment for optimizing item placement in a warehouse.
-
-    The agent's goal is to choose a row to place an incoming item (`WARENEINGANG`)
-    to minimize the travel distance for future item picks (`MATERIALENTNAHME`).
-
-    **Observation Space:** A dictionary with:
-        - 'racks': A numpy array of shape (28,) representing the 28 storage
-                   locations. Each element is an integer SKU_ID (0 for empty).
-        - 'task_sku': An integer SKU_ID for the item to be placed.
-
-    **Action Space:** A discrete space of size 7, where each action corresponds
-                   to choosing a row (0-6) for placement.
-
-    **Reward:**
-        - A negative reward equal to the Manhattan distance for each pick.
-        - 0 reward for placement actions.
-
-    **Termination:**
-        - The episode ends when all operations from the CSV file are processed.
-        - The episode ends if an item needs to be placed but the warehouse is full.
+    A generalized Gymnasium environment for warehouse optimization. It accepts any
+    layout via a grid and uses the 'pathfinding' library for A* distance calculations.
     """
     metadata = {'render_modes': ['human']}
 
-    def __init__(self, csv_path: str, render_mode: Optional[str] = None):
-        """
-        Initializes the Warehouse environment.
-
-        Args:
-            csv_path (str): The file path to the CSV containing warehouse operations.
-            render_mode (Optional[str]): The rendering mode ('human' or None).
-        """
+    def __init__(self, csv_path: str, layout_grid: np.ndarray, io_point: Tuple[int, int],
+                 render_mode: Optional[str] = None):
         super().__init__()
-
-        # Load and process the operations data
         self.df = pd.read_csv(csv_path)
         self._prepare_sku_mappings()
 
-        # Environment constants
-        self.n_rows = 7
-        self.n_cols_per_rack = 2
-        self.n_racks = 2
-        self.io_point = (0,0)
-        self.n_locations = self.n_rows * self.n_cols_per_rack * self.n_racks
+        # --- Layout and Pathfinding Setup ---
+        self.grid_matrix = layout_grid.T  # Transpose grid to treat (x, y) intuitively
+        self.io_point = io_point
 
-        # Define action and observation spaces
+        # --- Dynamic Environment Configuration from Grid ---
+        self._map_storable_locations()  # Creates mappings from grid
+
         self.action_space = gym.spaces.Discrete(self.n_rows)
         self.observation_space = gym.spaces.Dict({
             "racks": gym.spaces.Box(low=0, high=self.max_sku_id, shape=(self.n_locations,), dtype=np.int32),
             "task_sku": gym.spaces.Discrete(self.max_sku_id + 1)
         })
 
-        # Pre-calculate coordinates for reward calculation
-        self._initialize_location_coords()
-
         # Internal state
         self.racks_state = None
         self.racks_quantity_state = None
         self.current_step_index = 0
-
         self.render_mode = render_mode
 
     def _prepare_sku_mappings(self):
-        """Creates integer mappings for SKU strings."""
         unique_skus = sorted(self.df['SKU'].unique())
         self.sku_to_id = {sku: i + 1 for i, sku in enumerate(unique_skus)}
         self.id_to_sku = {i + 1: sku for i, sku in enumerate(unique_skus)}
         self.max_sku_id = len(unique_skus)
 
-    def _initialize_location_coords(self):
+    def _map_storable_locations(self):
         """
-        Assigns physical (x, y) coordinates to each storage location based on the
-        new layout with surrounding aisles.
+        Scans the grid to find all storable locations (value=1) and creates
+        helper mappings for quick lookups during simulation.
         """
-        self.location_coords = {}
-        # New Layout Definition:
-        # Aisle: x=0
-        # Rack A (front/back): x=1, x=2
-        # Center Aisle: x=3
-        # Rack B (front/back): x=4, x=5
-        # Aisle: x=6
-        for i in range(self.n_locations):
-            rack_idx = i // (self.n_rows * self.n_cols_per_rack)
-            loc_in_rack = i % (self.n_rows * self.n_cols_per_rack)
-            row_idx = loc_in_rack // self.n_cols_per_rack
-            col_idx = loc_in_rack % self.n_cols_per_rack
+        storable_xs, storable_ys = np.where(self.grid_matrix == 1)
 
-            y = row_idx + 1
-            if rack_idx == 0:  # Rack A
-                x = col_idx + 1
-            else:  # Rack B
-                x = col_idx + 4
-            self.location_coords[i] = (x, y)
+        self.storage_rows = sorted(list(np.unique(storable_ys)))
+        self.n_rows = len(self.storage_rows)  # This is now the basis for the action space
+        self.action_to_y_map = {action: y for action, y in enumerate(self.storage_rows)}
 
-    def _calculate_distance(self, item_coords: tuple) -> float:
+        self.storable_coords: List[Tuple[int, int]] = []
+        self.coord_to_idx_map: Dict[Tuple[int, int], int] = {}
+        self.row_to_indices_map: Dict[int, List[int]] = {y: [] for y in self.storage_rows}
+
+        for idx, (x, y) in enumerate(zip(storable_xs, storable_ys)):
+            coord = (x, y)
+            self.storable_coords.append(coord)
+            self.coord_to_idx_map[coord] = idx
+            if y in self.row_to_indices_map:
+                self.row_to_indices_map[y].append(idx)
+
+        self.n_locations = len(self.storable_coords)
+
+    def _calculate_distance(self, item_coord_idx: int) -> float:
         """
-        Calculates the Manhattan distance from the I/O point to an item,
-        considering the aisle layout. The worker must travel to the correct
-        aisle (x-travel) and then to the correct row (y-travel).
+        Calculates the direct Manhattan distance from the I/O point to an item's coordinates,
+        ignoring any obstacles.
         """
+        item_coords = self.storable_coords[item_coord_idx]
         item_x, item_y = item_coords
         io_x, io_y = self.io_point
 
-        # Y-distance is always the difference in rows
-        dist_y = abs(item_y - io_y)
-
-        # X-distance depends on the item's column and which aisle is closer to the I/O point
-        if item_x == 1:  # Rack A, front column (accessible from left aisle x=0 or center x=3)
-            dist_x = min(abs(0 - io_x), abs(3 - io_x))
-        elif item_x == 2:  # Rack A, back column (accessible from center aisle x=3)
-            dist_x = abs(3 - io_x)
-        elif item_x == 4:  # Rack B, front column (accessible from center aisle x=3)
-            dist_x = abs(3 - io_x)
-        elif item_x == 5:  # Rack B, back column (accessible from center aisle x=3 or right aisle x=6)
-            dist_x = min(abs(3 - io_x), abs(6 - io_x))
-        else:  # Should not happen
-            dist_x = 0
-
-        return float(dist_x + dist_y)
-
-    def _get_observation(self) -> Dict[str, Any]:
-        """
-        Constructs the observation, finding the next WARENEINGANG task for the agent
-        to act on.
-        """
-        task_sku_id = 0
-        # Search for the next WARENEINGANG from the current position
-        search_idx = self.current_step_index
-        while search_idx < len(self.df):
-            task = self.df.loc[search_idx]
-            if task['TransactionType'] == 'WARENEINGANG':
-                task_sku_id = self.sku_to_id[task['SKU']]
-                break
-            search_idx += 1
-
-        return {
-            "racks": self.racks_state.copy(),
-            "task_sku": task_sku_id
-        }
-
-    def _get_info(self) -> Dict[str, Any]:
-        """Returns auxiliary info."""
-        return {
-            "current_step": self.current_step_index,
-            "total_steps": len(self.df)
-        }
+        return float(abs(item_x - io_x) + abs(item_y - io_y))
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict] = None) -> (Dict, Dict):
-        """Resets the environment to its initial state."""
         super().reset(seed=seed)
-
         self.racks_state = np.zeros(self.n_locations, dtype=np.int32)
         self.racks_quantity_state = np.zeros(self.n_locations, dtype=np.int32)
         self.current_step_index = 0
-
-        observation = self._get_observation()
-        info = self._get_info()
-
-        if self.render_mode == "human":
-            self.render()
-
-        return observation, info
+        return self._get_observation(), self._get_info()
 
     def step(self, action: int) -> (Dict, float, bool, bool, Dict):
-        # 1. --- Process automatic PICK tasks ---
         total_reward = 0.0
         while self.current_step_index < len(self.df):
             task = self.df.loc[self.current_step_index]
             if task['TransactionType'] == 'MATERIALENTNAHME':
                 sku_to_pick_id = self.sku_to_id[task['SKU']]
                 quantity_to_pick = abs(task['Quantity'])
-                locations = np.where(self.racks_state == sku_to_pick_id)[0]
+                locations_indices = np.where(self.racks_state == sku_to_pick_id)[0]
+                if len(locations_indices) > 0:
+                    locations_indices = sorted(locations_indices, key=lambda idx: self._calculate_distance(idx))
+                    visited_locations_for_this_pick = set()
+                    for loc_idx in locations_indices:
+                        if quantity_to_pick == 0: break
 
-                if len(locations) > 0:
-                    loc_idx = locations[0]
-                    coords = self.location_coords[loc_idx]
-                    distance = self._calculate_distance(coords)
-                    total_reward -= distance
+                        if loc_idx not in visited_locations_for_this_pick:
+                            distance = self._calculate_distance(loc_idx)
+                            total_reward -= distance
+                            visited_locations_for_this_pick.add(loc_idx)
 
-                    # Update quantity and check if slot becomes empty
-                    self.racks_quantity_state[loc_idx] -= quantity_to_pick
-                    if self.racks_quantity_state[loc_idx] <= 0:
-                        self.racks_state[loc_idx] = 0  # Mark as empty
-                        self.racks_quantity_state[loc_idx] = 0
+                        available_qty = self.racks_quantity_state[loc_idx]
+                        pick_qty = min(quantity_to_pick, available_qty)
 
+                        self.racks_quantity_state[loc_idx] -= pick_qty
+                        quantity_to_pick -= pick_qty
+
+                        if self.racks_quantity_state[loc_idx] <= 0:
+                            self.racks_state[loc_idx] = 0
                 self.current_step_index += 1
             else:
-                break  # Stop at WARENEINGANG
-
+                break
         if self.current_step_index >= len(self.df):
             return self._get_observation(), total_reward, True, False, self._get_info()
 
-        # 2. --- Execute agent's PLACEMENT action ---
         current_task = self.df.loc[self.current_step_index]
         sku_to_place_id = self.sku_to_id[current_task['SKU']]
         quantity_to_place = current_task['Quantity']
 
         placed = False
-        # **UPDATED PLACEMENT LOGIC**
-        # Priority 1: Find existing stack of the same SKU and add to it.
-        # Priority 2: Find a new empty slot.
         for row_offset in range(self.n_rows):
-            row_to_check = (action + row_offset) % self.n_rows
+            # The action from the agent is an index from 0 to n_rows-1
+            current_action_index = (action + row_offset) % self.n_rows
 
-            # Search for existing stack in this row
-            existing_stack_found = False
-            for rack_idx in range(self.n_racks):
-                for col_idx in range(self.n_cols_per_rack):
-                    loc_idx = rack_idx * (
-                                self.n_rows * self.n_cols_per_rack) + row_to_check * self.n_cols_per_rack + col_idx
-                    if self.racks_state[loc_idx] == sku_to_place_id:
-                        self.racks_quantity_state[loc_idx] += quantity_to_place
-                        placed = True
-                        existing_stack_found = True
-                        break
-                if existing_stack_found: break
+            # Use the map to get the physical y-coordinate for this action
+            y_coord_to_check = self.action_to_y_map[current_action_index]
 
-            if placed: break
+            # Get all storable location indices for that physical row
+            loc_indices_in_row = self.row_to_indices_map.get(y_coord_to_check, [])
 
-            # If no existing stack, search for an empty slot in this row
-            empty_slot_found = False
-            for rack_idx in range(self.n_racks):
-                for col_idx in range(self.n_cols_per_rack):
-                    loc_idx = rack_idx * (
-                                self.n_rows * self.n_cols_per_rack) + row_to_check * self.n_cols_per_rack + col_idx
-                    if self.racks_state[loc_idx] == 0:
-                        self.racks_state[loc_idx] = sku_to_place_id
-                        self.racks_quantity_state[loc_idx] = quantity_to_place
-                        placed = True
-                        empty_slot_found = True
-                        break
-                if empty_slot_found: break
+            existing_stack_idx = next((idx for idx in loc_indices_in_row if self.racks_state[idx] == sku_to_place_id),
+                                      -1)
+            if existing_stack_idx != -1:
+                self.racks_quantity_state[existing_stack_idx] += quantity_to_place
+                placed = True
+                break
 
-            if placed: break
+            empty_slot_idx = next((idx for idx in loc_indices_in_row if self.racks_state[idx] == 0), -1)
+            if empty_slot_idx != -1:
+                self.racks_state[empty_slot_idx] = sku_to_place_id
+                self.racks_quantity_state[empty_slot_idx] = quantity_to_place
+                placed = True
+                break
 
         if not placed:
-            info = self._get_info()
-            info['error'] = 'Warehouse is full. Could not place item.'
+            info = self._get_info();
+            info['error'] = 'Warehouse is full.'
             return self._get_observation(), total_reward, True, False, info
 
         self.current_step_index += 1
-
-        # 3. --- Prepare return values ---
         terminated = self.current_step_index >= len(self.df)
-        observation = self._get_observation()
-        info = self._get_info()
-
         if self.render_mode == "human": self.render()
-        return observation, total_reward, terminated, False, info
+        return self._get_observation(), total_reward, terminated, False, self._get_info()
+
+    def _get_observation(self) -> Dict[str, Any]:
+        task_sku_id = 0
+        search_idx = self.current_step_index
+        while search_idx < len(self.df):
+            if self.df.loc[search_idx, 'TransactionType'] == 'WARENEINGANG':
+                task_sku_id = self.sku_to_id[self.df.loc[search_idx, 'SKU']];
+                break
+            search_idx += 1
+        return {"racks": self.racks_state.copy(), "task_sku": task_sku_id}
+
+    def _get_info(self) -> Dict[str, Any]:
+        return {"current_step": self.current_step_index, "total_steps": len(self.df)}
 
     def render(self):
-        """Renders the current state of the warehouse, including quantities."""
-        print("-" * 55)
-        print(f"Step: {self.current_step_index}/{len(self.df)}")
+        """
+        Renders the current state of the warehouse, including SKU IDs and quantities,
+        correctly mapping items to their storage locations on the grid.
+        """
+        # Adjust the header width based on the grid size for a clean look
+        header_width = self.grid_matrix.shape[0] * 8
+        print("\n" + "=" * header_width)
+        print(f"Step: {self.current_step_index}/{len(self.df)} | I/O Point: {self.io_point}")
 
-        # Display next task
-        if self.current_step_index < len(self.df):
-            task = self.df.loc[self.current_step_index]
-            if task['TransactionType'] == 'WARENEINGANG':
-                sku_name = task['SKU']
-                sku_id = self.sku_to_id[sku_name]
-                qty = task['Quantity']
-                print(f"Next Task: Place {qty} of '{sku_name}' (ID: {sku_id})")
-        else:
-            print("All tasks completed.")
+        # Use a wider cell for better formatting of "SKU:QTY"
+        cell_width = 7
+        # Create a grid for rendering based on the original layout (transposed back)
+        grid_render = self.grid_matrix.T.astype(f'<U{cell_width}')
 
-        print("\n          Rack A           ||           Rack B")
-        print("    (SKU: QTY)           ||      (SKU: QTY)")
-        print("-" * 55)
-        for r in range(self.n_rows):
-            row_str = f"Row {r} | "
-            for rack_idx in range(self.n_racks):
-                for col_idx in range(self.n_cols_per_rack):
-                    loc_idx = rack_idx * (self.n_rows * self.n_cols_per_rack) + r * self.n_cols_per_rack + col_idx
-                    sku = self.racks_state[loc_idx]
-                    qty = self.racks_quantity_state[loc_idx]
+        # Set default characters for aisles and empty racks
+        grid_render[self.grid_matrix.T == 0] = '·'.center(cell_width)
+        grid_render[self.grid_matrix.T == 1] = '███'.center(cell_width)
 
-                    val_str = f"{sku:>2}:{qty:<4}" if sku else "__: 0   "
-                    row_str += f"[{val_str}] "
+        # Populate the grid with items, showing "SKU:QTY"
+        for idx, sku_id in enumerate(self.racks_state):
+            if sku_id > 0:
+                # Get the correct (x, y) coordinate for this item's storage index
+                x, y = self.storable_coords[idx]
+                qty = self.racks_quantity_state[idx]
 
-                if rack_idx == 0:
-                    row_str += " || "
-            print(row_str)
-        print("-" * 55)
+                # Format the string as "SKU:QTY"
+                item_str = f"{sku_id}:{qty}"
+
+                # Place the formatted string at the correct [y, x] position on the render grid
+                grid_render[y, x] = item_str.center(cell_width)
+
+        # Place the I/O point on the grid
+        try:
+            io_y, io_x = self.io_point[1], self.io_point[0]
+            grid_render[io_y, io_x] = 'I/O'.center(cell_width)
+        except IndexError:
+            # This handles cases where the I/O point is outside the drawn grid
+            pass
+
+        print("Warehouse State:")
+        # Print the grid row by row
+        for row in grid_render:
+            print(" ".join(row))
+        print("=" * header_width)
 
     def close(self):
         pass
 
+def prepare_data_from_logs(filename="werkstattlager_logs.csv"):
+    df = pd.read_csv(filename);
+    demand_df = df[df['TransactionType'] == 'MATERIALENTNAHME'];
+    popularity_counts = demand_df['SKU'].value_counts();
+    item_catalog = {sku: {'popularity': count} for sku, count in popularity_counts.items()};
+    [item_catalog.update({sku: {'popularity': 0}}) for sku in df['SKU'].unique() if sku not in item_catalog];
+    print(item_catalog)
+    return item_catalog, df.sort_values(by="Timestamp").to_dict('records')
 
-def evaluate_model(model_path: str, csv_path: str, num_episodes: int = 10, io_point: tuple = (0, 0)):
+
+def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, item_catalog_preset: dict = None, render: bool = False):
     """
-    Evaluates a trained model's performance and calculates the average picking cost.
-
-    Args:
-        model_path (str): Path to the saved model file.
-        csv_path (str): Path to the CSV file with warehouse operations.
-        num_episodes (int): The number of episodes to run for evaluation.
-        io_point (tuple): The (x, y) coordinates of the I/O point.
+    Evaluates the ABC agent and calculates the final picking cost.
+    Optionally visualizes the process.
     """
-    print(f"\n--- Evaluating Trained Model: {os.path.basename(model_path)} ---")
+    title = "ABC Agent (Visual)" if render else "ABC Agent (Heuristic)"
+    print(f"\n--- Evaluating {title} ---")
 
-    # Create the evaluation environment (no rendering for speed)
-    eval_env = WarehouseEnv(csv_path=csv_path, io_point=io_point)
+    item_catalog, transactions = prepare_data_from_logs(csv_path)
+
+    if not transactions:
+        print("Could not load transaction data for ABC agent.")
+        return 0
+
+    # ABC agent uses (y, x) coordinates, so we pass the layout and IO point in that format.
+    abc_agent = ABCAgent(layout_matrix=layout_grid, io_point=(io_point[1], io_point[0]), item_catalog=item_catalog if item_catalog_preset is None else item_catalog_preset)
+
+    visualizer = None
+    if render:
+        visualizer = WarehouseVisualizer(layout_matrix=layout_grid, io_point=(io_point[1], io_point[0]),
+                                         zones=abc_agent.zones, item_classes=abc_agent.item_classes)
+
+    occupied = {}
+    total_picking_cost = 0
+
+    for trans in transactions:
+        item_id, quantity = trans['SKU'], trans['Quantity']
+
+        if trans['TransactionType'] == 'WARENEINGANG':
+            # Use the correct method to get the storage plan
+            plan = abc_agent.find_storage_for_batch(item_id, quantity, occupied)
+
+            # PUTAWAY COSTS ARE NOT RECORDED FOR A FAIR BENCHMARK
+            for step in plan:
+                loc, add_qty = step['location'], step['add_quantity']
+                if 'new_sku' in step:
+                    occupied[loc] = {'sku': item_id, 'quantity': add_qty}
+                elif loc in occupied:
+                    occupied[loc]['quantity'] += add_qty
+
+        elif trans['TransactionType'] == 'MATERIALENTNAHME':
+            quantity_to_pick = abs(quantity)
+            locations_of_item = [loc for loc, data in occupied.items() if data['sku'] == item_id]
+            locations_of_item.sort(key=lambda l: abc_agent.travel_times[l])
+
+            locations_visited_for_this_pick = set()
+
+            if locations_of_item:
+                for loc in locations_of_item:
+                    if quantity_to_pick == 0: break
+                    locations_visited_for_this_pick.add(loc)
+
+                    available_qty = occupied[loc]['quantity']
+                    pick_qty = min(quantity_to_pick, available_qty)
+
+                    occupied[loc]['quantity'] -= pick_qty
+                    quantity_to_pick -= pick_qty
+
+                    if occupied[loc]['quantity'] == 0:
+                        del occupied[loc]
+
+            # PICKING COSTS ARE RECORDED
+            for loc in locations_visited_for_this_pick:
+                total_picking_cost += abc_agent.travel_times.get(loc, 0)
+
+        if render and visualizer:
+            visualizer.draw(occupied, f"Action: {trans['TransactionType']}", total_picking_cost)
+            pygame.time.wait(50)
+
+    if render and visualizer:
+        visualizer.draw(occupied, f"ENDE! Finale Kosten: {total_picking_cost}", total_picking_cost)
+        pygame.time.wait(3000)
+        pygame.quit()
+
+    print(f"Final Picking Cost: {total_picking_cost:.2f}")
+    return total_picking_cost
+
+def evaluate_model(model_path: str, csv_path: str, layout_grid: np.ndarray, io_point: tuple, num_episodes: int = 10):
+    print(f"\n--- Evaluating PPO Agent: {os.path.basename(model_path)} ---")
+    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point, render_mode="human")
     model = PPO.load(model_path, env=eval_env)
-
-    total_rewards = []
-    for _ in range(num_episodes):
-        obs, _ = eval_env.reset()
-        terminated = False
-        episode_reward = 0
-        while not terminated:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, _, _ = eval_env.step(action)
-            episode_reward += reward
-        total_rewards.append(episode_reward)
-
+    total_rewards = [];
+    [total_rewards.append(run_episode(eval_env, model)) for _ in range(num_episodes)];
     eval_env.close()
-
-    # Calculate costs (cost is the negative of the reward)
-    avg_reward = np.mean(total_rewards)
-    std_reward = np.std(total_rewards)
-    avg_cost = -avg_reward
-    std_cost = std_reward
-
-    print(f"Evaluation over {num_episodes} episodes:")
-    print(f"Average Reward: {avg_reward:.2f} +/- {std_reward:.2f}")
-    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}")
+    avg_cost = -np.mean(total_rewards);
+    std_cost = np.std(total_rewards);
+    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}");
     return avg_cost
 
 
-def evaluate_random_agent(csv_path: str, num_episodes: int = 10, io_point: tuple = (0, 0)):
-    """
-    Evaluates a random agent as a baseline and calculates its average picking cost.
-    """
+def evaluate_random_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, num_episodes: int = 10):
     print("\n--- Evaluating Random Agent (Baseline) ---")
-
-    eval_env = WarehouseEnv(csv_path=csv_path, io_point=io_point)
-    total_rewards = []
-
-    for _ in range(num_episodes):
-        _, _ = eval_env.reset()
-        terminated = False
-        episode_reward = 0
-        while not terminated:
-            action = eval_env.action_space.sample()  # Choose a random action
-            _, reward, terminated, _, _ = eval_env.step(action)
-            episode_reward += reward
-        total_rewards.append(episode_reward)
-
+    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point)
+    total_rewards = [];
+    [total_rewards.append(run_episode(eval_env, None)) for _ in range(num_episodes)];
     eval_env.close()
-
-    avg_reward = np.mean(total_rewards)
-    std_reward = np.std(total_rewards)
-    avg_cost = -avg_reward
-    std_cost = std_reward
-
-    print(f"Evaluation over {num_episodes} episodes:")
-    print(f"Average Reward: {avg_reward:.2f} +/- {std_reward:.2f}")
-    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}")
+    avg_cost = -np.mean(total_rewards);
+    std_cost = np.std(total_rewards);
+    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}");
     return avg_cost
+
+
+def run_episode(env, model=None):
+    obs, _ = env.reset();
+    terminated, episode_reward = False, 0
+    while not terminated:
+        action = model.predict(obs, deterministic=True)[0] if model else env.action_space.sample()
+        obs, reward, terminated, _, _ = env.step(action);
+        episode_reward += reward
+    return episode_reward
+
+
+def train_agent(csv_path, layout_grid, io_point, timesteps=200_000):
+    """Handles the complete training process for the PPO agent."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    LOGS_DIR, MODEL_DIR = "logs", "models"
+    os.makedirs(LOGS_DIR, exist_ok=True);
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    env = DummyVecEnv([lambda: Monitor(WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point, render_mode="human"))])
+    episode_length = len(pd.read_csv(csv_path));
+    buffer_size = 2048
+    if buffer_size < episode_length: buffer_size = episode_length + (128 - episode_length % 128)
+    model = PPO("MultiInputPolicy", env, verbose=0, n_steps=buffer_size, batch_size=64)
+    model.set_logger(configure(os.path.join(LOGS_DIR, f"PPO_{timestamp}"), ["stdout", "tensorboard"]))
+    print(f"\n🚀 Training PPO Agent for {timesteps} timesteps...");
+    model.learn(total_timesteps=timesteps);
+    print("✅ Training complete!")
+    final_model_path = os.path.join(MODEL_DIR, f"final_model_{timestamp}.zip");
+    model.save(final_model_path);
+    print(f"📦 Final model saved to {final_model_path}")
+    return final_model_path
+
+
+def run_all_evaluations(model_path, csv_path, layout_grid, io_point):
+    """Runs both statistical and visual evaluations for the agents."""
+    print("\n" + "=" * 50 + "\nPERFORMANCE EVALUATION (STATISTICAL)\n" + "=" * 50)
+    ppo_cost = evaluate_model(model_path, csv_path, layout_grid, io_point, num_episodes=20)
+
+    preset_popularity = {
+        'SCHRAUBE-M8x40': {'popularity': 149},
+        'KABELBINDER-200mm': {'popularity': 147},
+        'KUGELLAGER-6204-2RS': {'popularity': 42},
+        'FILTER-LUFT-A45': {'popularity': 38},
+        'SICHERUNG-10A': {'popularity': 32},
+        'SENSOR-DRUCK-P20': {'popularity': 7},
+        'RELAIS-12V-KFZ': {'popularity': 3},
+        'BREMSFLUESSIGKEIT-DOT4': {'popularity': 3},
+        'MOTOR-KEILRIEMEN-XPA': {'popularity': 1},
+        'DICHTUNG-GUMMI-S12': {'popularity': 1}
+    }
+
+    abc_cost = evaluate_abc_agent(csv_path, layout_grid, io_point, preset_popularity, render=True)  # This needs to be created
+
+    print("\n--- Summary ---")
+    print(f"ABC Agent (Heuristic) Cost:   {abc_cost:.2f}")
+    print(f"PPO Agent (Trained) Cost:     {ppo_cost:.2f}")
+
+    print("\n" + "=" * 50 + "\nPERFORMANCE EVALUATION (VISUAL)\n" + "=" * 50)
+    evaluate_model(model_path, csv_path, layout_grid, io_point, num_episodes=10)
+    evaluate_abc_agent(csv_path, layout_grid, io_point)
+    evaluate_random_agent(csv_path, layout_grid, io_point, num_episodes=10)
 
 
 if __name__ == '__main__':
-    # --- 1. Set up paths and a unique timestamp for this run ---
-    from datetime import datetime
-    from stable_baselines3.common.logger import configure
-
-    # Generate a timestamp string like "20250830-145212"
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-
+    layout = np.array([[0, 0, 0, 0, 0, 0, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 1, 1, 0, 1, 1, 0],
+                       [0, 0, 0, 0, 0, 0, 0]
+                       ])
+    IO_POINT = (0, 4)
     CSV_FILE = 'werkstattlager_logs.csv'
-    LOGS_DIR = "logs"
-    MODEL_DIR = "models"
 
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(MODEL_DIR, exist_ok=True)
+    # Train the PPO Agent
+    #trained_model_path = "models/final_model_20250830-183144"
+    trained_model_path = train_agent(CSV_FILE, layout, IO_POINT, timesteps=1_000_000)
 
-    # --- 2. Instantiate the Environment ---
-    df = pd.read_csv(CSV_FILE)
-    episode_length = len(df)
-    print(f"Detected episode length: {episode_length} steps.")
-
-    # Use a non-rendering environment for faster training
-    env = DummyVecEnv([lambda: Monitor(WarehouseEnv(csv_path=CSV_FILE))])
-
-    buffer_size = 2048
-    if buffer_size < episode_length:
-        buffer_size = episode_length + (128 - episode_length % 128)
-        print(f"Adjusting n_steps to {buffer_size} to fit a full episode.")
-
-    # --- 3. Set up the PPO model (without tensorboard_log initially) ---
-    model = PPO(
-        "MultiInputPolicy",
-        env,
-        verbose=1,
-        n_steps=buffer_size,
-        batch_size=64,
-        gamma=0.99,
-        ent_coef=0.05,
-        gae_lambda=0.95
-    )
-
-    # --- 4. Manually set up a custom, timestamped logger ---
-    run_log_path = os.path.join(LOGS_DIR, f"PPO_{timestamp}")
-    new_logger = configure(run_log_path, ["stdout", "tensorboard"])
-    model.set_logger(new_logger)
-    print(f"--- Starting new training run ---")
-    print(f"Logs will be saved to: {run_log_path}")
-
-    # --- 5. Set up a callback to save timestamped checkpoints ---
-    checkpoint_prefix = f"ppo_checkpoint_{timestamp}"
-    checkpoint_callback = CheckpointCallback(
-        save_freq=20000,
-        save_path=MODEL_DIR,
-        name_prefix=checkpoint_prefix,
-    )
-
-    # --- 6. Train the agent ---
-    TRAINING_TIMESTEPS = 200_000
-    print(f"\n🚀 Starting training for {TRAINING_TIMESTEPS} timesteps...")
-    model.learn(total_timesteps=TRAINING_TIMESTEPS, callback=checkpoint_callback)
-    print("✅ Training complete!")
-
-    # --- 7. Save the final timestamped model ---
-    final_model_path = os.path.join(MODEL_DIR, f"final_model_{timestamp}.zip")
-    model.save(final_model_path)
-    print(f"📦 Final model saved to {final_model_path}")
-
-    # --- 5. Evaluate the trained model and a random baseline ---
-    print("\n" + "=" * 50)
-    print("PERFORMANCE EVALUATION")
-    print("=" * 50)
-
-    # Evaluate the model we just trained
-    trained_model_cost = evaluate_model(model_path=final_model_path, csv_path=CSV_FILE, num_episodes=20)
-
-    # Evaluate a random agent for comparison
-    random_agent_cost = evaluate_random_agent(csv_path=CSV_FILE, num_episodes=20)
-
-    print("\n--- Summary ---")
-    print(f"Random Agent Average Cost:   {random_agent_cost:.2f}")
-    print(f"Trained Agent Average Cost:  {trained_model_cost:.2f}")
-
-    improvement = ((random_agent_cost - trained_model_cost) / random_agent_cost) * 100
-    if improvement > 0:
-        print(f"The trained agent is {improvement:.2f}% better than a random agent.")
-    else:
-        print(f"The trained agent did not perform better than a random agent.")
-    print("=" * 50)
+    # Run all evaluations
+    run_all_evaluations(trained_model_path, CSV_FILE, layout, IO_POINT)
