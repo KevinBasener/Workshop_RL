@@ -11,12 +11,11 @@ FILENAME = "werkstattlager_logs_changed_pop.csv"
 # --- STAMMDATEN FÜR WERKSTATTLAGER (10 ARTIKEL) ---
 # Simuliert das Pareto-Prinzip für typische Werkstattartikel
 # A-Artikel (Verbrauchsmaterial, 2 SKUs, 70% der Bewegungen)
-fast_movers = ["SCHRAUBE-M8x40", "KABELBINDER-200mm", "KUGELLAGER-6204-2RS",  "FILTER-LUFT-A45"]
+fast_movers = ["SCHRAUBE-M8x40", "KABELBINDER-200mm", "FILTER-LUFT-A45", "MOTOR-KEILRIEMEN-XPA", "BREMSFLUESSIGKEIT-DOT4"]
 # B-Artikel (Regelmäßige Ersatzteile, 3 SKUs, 25% der Bewegungen)
-medium_movers = ["SICHERUNG-10A", "MOTOR-KEILRIEMEN-XPA", "SENSOR-DRUCK-P20"]
+medium_movers = ["KUGELLAGER-6204-2RS", "SICHERUNG-10A"]
 # C-Artikel (Selten benötigte Teile, 5 SKUs, 5% der Bewegungen)
-slow_movers = ["DICHTUNG-GUMMI-S12", "RELAIS-12V-KFZ",
-               "BREMSFLUESSIGKEIT-DOT4"]
+slow_movers = ["SENSOR-DRUCK-P20", "DICHTUNG-GUMMI-S12", "RELAIS-12V-KFZ"]
 
 ALL_SKUS = fast_movers + medium_movers + slow_movers
 SKU_PROBABILITIES = ([0.70 / len(fast_movers)] * len(fast_movers) +

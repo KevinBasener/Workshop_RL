@@ -7,6 +7,8 @@ from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime
 
 import pygame
+import matplotlib
+matplotlib.use('TkAgg')
 from matplotlib import pyplot as plt
 # Import the pathfinding library
 from pathfinding.core.grid import Grid
@@ -245,10 +247,10 @@ def prepare_data_from_logs(filename="werkstattlager_logs.csv"):
     return item_catalog, df.sort_values(by="Timestamp").to_dict('records')
 
 
-def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, item_catalog_preset: dict = None, render: bool = False):
+def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, item_catalog_preset: dict = None,
+                       render: bool = False):
     """
-    Evaluates the ABC agent and calculates the final picking cost.
-    Optionally visualizes the process.
+    Evaluates the ABC agent, calculates the final picking cost, and returns the cost history.
     """
     title = "ABC Agent (Visual)" if render else "ABC Agent (Heuristic)"
     print(f"\n--- Evaluating {title} ---")
@@ -257,10 +259,10 @@ def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, 
 
     if not transactions:
         print("Could not load transaction data for ABC agent.")
-        return 0
+        return 0, []
 
-    # ABC agent uses (y, x) coordinates, so we pass the layout and IO point in that format.
-    abc_agent = ABCAgent(layout_matrix=layout_grid, io_point=(io_point[1], io_point[0]), item_catalog=item_catalog if item_catalog_preset is None else item_catalog_preset)
+    abc_agent = ABCAgent(layout_matrix=layout_grid, io_point=(io_point[1], io_point[0]),
+                         item_catalog=item_catalog if item_catalog_preset is None else item_catalog_preset)
 
     visualizer = None
     if render:
@@ -269,15 +271,13 @@ def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, 
 
     occupied = {}
     total_picking_cost = 0
+    cost_history = [0]  # Start with cost 0 at transaction 0
 
     for trans in transactions:
         item_id, quantity = trans['SKU'], trans['Quantity']
 
         if trans['TransactionType'] == 'WARENEINGANG':
-            # Use the correct method to get the storage plan
             plan = abc_agent.find_storage_for_batch(item_id, quantity, occupied)
-
-            # PUTAWAY COSTS ARE NOT RECORDED FOR A FAIR BENCHMARK
             for step in plan:
                 loc, add_qty = step['location'], step['add_quantity']
                 if 'new_sku' in step:
@@ -289,26 +289,22 @@ def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, 
             quantity_to_pick = abs(quantity)
             locations_of_item = [loc for loc, data in occupied.items() if data['sku'] == item_id]
             locations_of_item.sort(key=lambda l: abc_agent.travel_times[l])
-
             locations_visited_for_this_pick = set()
 
             if locations_of_item:
                 for loc in locations_of_item:
                     if quantity_to_pick == 0: break
                     locations_visited_for_this_pick.add(loc)
-
                     available_qty = occupied[loc]['quantity']
                     pick_qty = min(quantity_to_pick, available_qty)
-
                     occupied[loc]['quantity'] -= pick_qty
                     quantity_to_pick -= pick_qty
+                    if occupied[loc]['quantity'] == 0: del occupied[loc]
 
-                    if occupied[loc]['quantity'] == 0:
-                        del occupied[loc]
-
-            # PICKING COSTS ARE RECORDED
             for loc in locations_visited_for_this_pick:
                 total_picking_cost += abc_agent.travel_times.get(loc, 0)
+
+        cost_history.append(total_picking_cost)  # Append cumulative cost after each transaction
 
         if render and visualizer:
             visualizer.draw(occupied, f"Action: {trans['TransactionType']}", total_picking_cost)
@@ -320,42 +316,95 @@ def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, 
         pygame.quit()
 
     print(f"Final Picking Cost: {total_picking_cost:.2f}")
-    return total_picking_cost
+    return total_picking_cost, cost_history
+
 
 def evaluate_model(model_path: str, csv_path: str, layout_grid: np.ndarray, io_point: tuple, num_episodes: int = 10):
     print(f"\n--- Evaluating PPO Agent: {os.path.basename(model_path)} ---")
-    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point, render_mode="human")
+    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point)
     model = PPO.load(model_path, env=eval_env)
-    total_rewards = [];
-    [total_rewards.append(run_episode(eval_env, model)) for _ in range(num_episodes)];
+
+    total_rewards = []
+    cost_history_for_plot = None
+
+    for i in range(num_episodes):
+        episode_reward, history = run_episode(eval_env, model)
+        total_rewards.append(episode_reward)
+        if i == 0:  # Store history from the first episode for plotting
+            cost_history_for_plot = history
+
     eval_env.close()
-    avg_cost = -np.mean(total_rewards);
-    std_cost = np.std(total_rewards);
-    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}");
-    return avg_cost
+    avg_cost = -np.mean(total_rewards)
+    std_cost = np.std(total_rewards)
+    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}")
+    return avg_cost, cost_history_for_plot
 
 
 def evaluate_random_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, num_episodes: int = 10):
     print("\n--- Evaluating Random Agent (Baseline) ---")
     eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point)
-    total_rewards = [];
-    [total_rewards.append(run_episode(eval_env, None)) for _ in range(num_episodes)];
+
+    total_rewards = []
+    cost_history_for_plot = None
+
+    for i in range(num_episodes):
+        episode_reward, history = run_episode(eval_env, None)
+        total_rewards.append(episode_reward)
+        if i == 0:  # Store history from the first episode for plotting
+            cost_history_for_plot = history
+
     eval_env.close()
-    avg_cost = -np.mean(total_rewards);
-    std_cost = np.std(total_rewards);
-    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}");
-    return avg_cost
+    avg_cost = -np.mean(total_rewards)
+    std_cost = np.std(total_rewards)
+    print(f"Average Picking Cost: {avg_cost:.2f} +/- {std_cost:.2f}")
+    return avg_cost, cost_history_for_plot
 
 
 def run_episode(env, model=None):
-    obs, _ = env.reset();
+    obs, _ = env.reset()
     terminated, episode_reward = False, 0
+
+    # Stores tuples of (transaction_index, cumulative_cost)
+    cost_milestones = [(0, 0)]
+
     while not terminated:
         action = model.predict(obs, deterministic=True)[0] if model else env.action_space.sample()
-        obs, reward, terminated, _, _ = env.step(action);
+        obs, reward, terminated, _, info = env.step(action)
         episode_reward += reward
-    return episode_reward
+        cost_milestones.append((info['current_step'], -episode_reward))
 
+    # Create a list that maps 1-to-1 with transactions for consistent plotting
+    total_transactions = len(env.df)
+    cost_history = []
+    milestone_idx = 0
+    current_cost = 0
+    for i in range(total_transactions + 1):
+        if milestone_idx < len(cost_milestones) and i >= cost_milestones[milestone_idx][0]:
+            current_cost = cost_milestones[milestone_idx][1]
+            milestone_idx += 1
+        cost_history.append(current_cost)
+
+    return episode_reward, cost_history
+
+
+def plot_comparison_graph(results: Dict[str, List[float]]):
+    """
+    Plots the cumulative picking cost of different agents over the course of all transactions.
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    plt.figure(figsize=(12, 8))
+
+    for agent_name, cost_history in results.items():
+        # Ensure the list is not empty before plotting
+        if cost_history:
+            plt.plot(cost_history, label=agent_name, linewidth=2.5)
+
+    plt.title('Agent Performance Comparison: Cumulative Picking Cost', fontsize=16)
+    plt.xlabel('Transaction Number', fontsize=12)
+    plt.ylabel('Cumulative Picking Cost', fontsize=12)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    plt.show()
 
 def train_agent(csv_path, layout_grid, io_point, timesteps=200_000):
     """Handles the complete training process for the PPO agent."""
@@ -381,7 +430,43 @@ def train_agent(csv_path, layout_grid, io_point, timesteps=200_000):
 def run_all_evaluations(model_path, csv_path, layout_grid, io_point):
     """Runs both statistical and visual evaluations for the agents."""
     print("\n" + "=" * 50 + "\nPERFORMANCE EVALUATION (STATISTICAL)\n" + "=" * 50)
-    ppo_cost = evaluate_model(model_path, csv_path, layout_grid, io_point, num_episodes=20)
+    # Evaluate the PPO (RL) Agent
+    ppo_cost, ppo_history = evaluate_model(
+        model_path, csv_path, layout_grid, io_point, num_episodes=10
+    )
+
+    # Evaluate the ABC Agent (set render=False for data collection)
+    abc_cost, abc_history = evaluate_abc_agent(
+        csv_path, layout_grid, io_point, render=False
+    )
+
+    # Evaluate the Random Agent
+    random_cost, random_history = evaluate_random_agent(
+        csv_path, layout_grid, io_point, num_episodes=10
+    )
+
+    print("\n" + "=" * 50 + "\n--- Summary of Average Costs ---\n" + "=" * 50)
+    print(f"PPO Agent:      {ppo_cost:.2f}")
+    print(f"ABC Agent:      {abc_cost:.2f}")
+    print(f"Random Agent:   {random_cost:.2f}\n" + "=" * 50)
+
+    if ppo_cost > 0:
+        abc_change = ((abc_cost - ppo_cost) / ppo_cost) * 100
+        random_change = ((random_cost - ppo_cost) / ppo_cost) * 100
+        print("\n--- Performance vs. PPO Agent ---")
+        print(f"ABC Agent cost is {abc_change:+.2f}% compared to PPO.")
+        print(f"Random Agent cost is {random_change:+.2f}% compared to PPO.")
+        print("(A positive percentage means higher/worse cost)")
+
+    print("=" * 50)
+
+    # Plot the results from a single, representative run of each agent
+    plot_data = {
+        'RL (PPO) Agent': ppo_history,
+        'Heuristic (ABC) Agent': abc_history,
+        'Random Agent': random_history,
+    }
+    plot_comparison_graph(plot_data)
 
     preset_popularity = {
         'SCHRAUBE-M8x40': {'popularity': 149},
@@ -396,50 +481,42 @@ def run_all_evaluations(model_path, csv_path, layout_grid, io_point):
         'DICHTUNG-GUMMI-S12': {'popularity': 1}
     }
 
-    abc_cost = evaluate_abc_agent(csv_path, layout_grid, io_point, preset_popularity, render=True)  # This needs to be created
 
-    print("\n--- Summary ---")
-    print(f"ABC Agent (Heuristic) Cost:   {abc_cost:.2f}")
-    print(f"PPO Agent (Trained) Cost:     {ppo_cost:.2f}")
-
-    print("\n" + "=" * 50 + "\nPERFORMANCE EVALUATION (VISUAL)\n" + "=" * 50)
-    evaluate_model(model_path, csv_path, layout_grid, io_point, num_episodes=10)
-    evaluate_abc_agent(csv_path, layout_grid, io_point)
-    evaluate_random_agent(csv_path, layout_grid, io_point, num_episodes=10)
-
-
-def plot_agent_comparison(results: dict, filename="agent_comparison.png"):
+def plot_popularity_comparison(original_csv_path: str, changed_csv_path: str, filename="popularity_comparison.png"):
     """
-    Creates a bar chart comparing the performance of different agents.
-
-    Args:
-        results (dict): A dictionary with agent names as keys and (cost, std_dev) as values.
-        filename (str): The name of the file to save the plot.
+    Erstellt ein horizontales Balkendiagramm, das die Artikelpopularität
+    (Anzahl der Entnahmen) zwischen zwei Datensätzen vergleicht.
     """
-    agents = list(results.keys())
-    costs = [res[0] for res in results.values()]
-    std_devs = [res[1] for res in results.values()]
+    # 1. Daten laden
+    df_orig = pd.read_csv(original_csv_path)
+    df_changed = pd.read_csv(changed_csv_path)
 
-    plt.style.use('seaborn-v0_8-whitegrid')
-    fig, ax = plt.subplots(figsize=(10, 6))
+    # 2. Popularitäten für beide Szenarien berechnen
+    pop_orig = df_orig[df_orig['TransactionType'] == 'MATERIALENTNAHME']['SKU'].value_counts().rename('Original')
+    pop_changed = df_changed[df_changed['TransactionType'] == 'MATERIALENTNAHME']['SKU'].value_counts().rename(
+        'Geändert')
 
-    bars = ax.bar(agents, costs, yerr=std_devs, capsize=5, color=['#1f77b4', '#ff7f0e', '#2ca02c'])
+    # 3. Daten für den Plot zusammenführen und sortieren
+    df_comparison = pd.concat([pop_orig, pop_changed], axis=1).fillna(0)
+    df_comparison = df_comparison.sort_values(by='Original', ascending=True)
 
-    ax.set_ylabel('Average Total Picking Cost (Lower is Better)')
-    ax.set_title('Agent Performance Comparison (Original Data)')
-    ax.set_xticks(range(len(agents)))
-    ax.set_xticklabels(agents, rotation=0)
+    # 4. Diagramm erstellen
+    ax = df_comparison.plot(kind='barh', figsize=(12, 10), width=0.8,
+                            title="Vergleich der Artikelpopularität (Anzahl Entnahmen)")
 
-    for bar in bars:
-        yval = bar.get_height()
-        ax.text(bar.get_x() + bar.get_width() / 2.0, yval + np.mean(std_devs) * 0.1, f'{yval:.2f}', va='bottom',
-                ha='center')
+    ax.set_xlabel("Anzahl der Entnahmen (höher ist populärer)")
+    ax.set_ylabel("Artikel (SKU)")
+    ax.legend(title="Szenario")
+    ax.grid(axis='x', linestyle='--', alpha=0.7)
+
+    # Werte an die Balken schreiben für bessere Lesbarkeit
+    for container in ax.containers:
+        ax.bar_label(container, label_type='edge', fontsize=9, padding=3)
 
     plt.tight_layout()
     plt.savefig(filename)
-    print(f"\nSaved comparison plot to {filename}")
+    print(f"\n📊 Vergleichsdiagramm der Popularitäten gespeichert unter: {filename}")
     plt.close()
-
 
 def plot_popularity_change_impact(results: dict, filename="popularity_impact.png"):
     """
@@ -467,6 +544,143 @@ def plot_popularity_change_impact(results: dict, filename="popularity_impact.png
     print(f"Saved popularity impact plot to {filename}")
     plt.close()
 
+
+def create_swapped_popularity_csv(original_csv_path: str, new_csv_path: str = "werkstattlager_logs_changed.csv"):
+    """
+    Creates a new CSV file by swapping the most and least popular SKUs from the original file.
+
+    This simulates a drastic shift in product demand to test agent adaptability.
+    """
+    print(f"\n🔄 Creating a new dataset with swapped item popularities...")
+    df = pd.read_csv(original_csv_path)
+
+    # Calculate popularity based on picking transactions
+    demand_df = df[df['TransactionType'] == 'MATERIALENTNAHME']
+    popularity_counts = demand_df['SKU'].value_counts()
+
+    if len(popularity_counts) < 2:
+        print("Not enough unique SKUs to perform a swap. Aborting.")
+        return original_csv_path
+
+    # Identify the most and least popular items
+    most_popular_sku = popularity_counts.index[0]
+    least_popular_sku = popularity_counts.index[-1]
+    print(f"Swapping most popular SKU '{most_popular_sku}' with least popular SKU '{least_popular_sku}'.")
+
+    # Create a mapping for the swap
+    swap_map = {
+        most_popular_sku: least_popular_sku,
+        least_popular_sku: most_popular_sku
+    }
+
+    # Apply the swap to the entire dataframe
+    df['SKU'] = df['SKU'].replace(swap_map)
+
+    # Save the new dataframe to a csv
+    df.to_csv(new_csv_path, index=False)
+    print(f"✅ New dataset saved to '{new_csv_path}'")
+    return new_csv_path
+
+
+def plot_adaptability_slopegraph(results: dict, filename="adaptability_slopegraph.png"):
+    """
+    Creates a Slopegraph to visualize the performance change of agents
+    when item popularities are swapped.
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(10, 8))
+
+    # Define the two scenarios for the x-axis
+    scenarios = ['Original Popularity', 'Changed Popularity']
+    x_coords = [0, 1]
+    colors = {'RL Agent': '#1f77b4', 'ABC Agent': '#ff7f0e', 'Random Agent': '#2ca02c'}
+
+    # Plot lines and points for each agent
+    for agent, data in results.items():
+        original_cost = data.get('original', 0)
+        changed_cost = data.get('changed', 0)
+
+        # Plot the line connecting the two points
+        ax.plot(x_coords, [original_cost, changed_cost],
+                marker='o', markersize=8, label=agent,
+                color=colors.get(agent, 'gray'), linewidth=2.5)
+
+        # Add text labels for the costs
+        ax.text(-0.05, original_cost, f'{original_cost:.0f}', ha='right', va='center', fontsize=10, weight='bold')
+        ax.text(1.05, changed_cost, f'{changed_cost:.0f}', ha='left', va='center', fontsize=10, weight='bold')
+
+    # --- Formatting the plot ---
+    ax.set_title('Agent Adaptability to Popularity Change', fontsize=16, pad=20)
+    ax.set_ylabel('Average Total Picking Cost (Lower is Better)', fontsize=12)
+    ax.set_xticks(x_coords)
+    ax.set_xticklabels(scenarios, fontsize=12)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.yaxis.grid(True)
+    ax.xaxis.grid(False)
+    ax.legend(title='Agent Type', loc='best', fontsize=10)
+
+    plt.tight_layout()
+    plt.savefig(filename)
+    print(f"\n📈 Saved adaptability slopegraph to {filename}")
+    plt.close()
+
+
+def run_adaptability_scenario(model_path: str, original_csv: str, changed_csv: str, layout_grid: np.ndarray, io_point: tuple):
+    """
+    Runs an evaluation scenario to test agent adaptability and plots the results as a slopegraph.
+    """
+    print("\n" + "=" * 50 + "\nADAPTABILITY SCENARIO\n" + "=" * 50)
+
+    # 1. Create the new dataset with inverted popularities
+    changed_csv = create_swapped_popularity_csv(original_csv)
+
+    plot_popularity_comparison(original_csv, changed_csv)
+
+    # 2. Get the "outdated" item catalog from the ORIGINAL data for the ABC agent
+    outdated_item_catalog, _ = prepare_data_from_logs(original_csv)
+
+    # --- 3. Evaluate agents on BOTH datasets to see the change ---
+    print("\n--- Evaluating agents on ORIGINAL data (Baseline) ---")
+    rl_cost_orig, _ = evaluate_model(model_path, original_csv, layout_grid, io_point, num_episodes=10)
+    abc_cost_orig, _ = evaluate_abc_agent(original_csv, layout_grid, io_point)
+    random_cost_orig, _ = evaluate_random_agent(original_csv, layout_grid, io_point, num_episodes=10)
+
+    print("\n--- Evaluating agents on CHANGED data (Test) ---")
+    rl_cost_changed, _ = evaluate_model(model_path, changed_csv, layout_grid, io_point, num_episodes=10)
+    abc_cost_changed, _ = evaluate_abc_agent(changed_csv, layout_grid, io_point,
+                                             item_catalog_preset=outdated_item_catalog)
+    random_cost_changed, _ = evaluate_random_agent(changed_csv, layout_grid, io_point, num_episodes=10)
+
+    # 4. Collate results in a structure suitable for the slopegraph
+    results = {
+        "RL Agent": {"original": rl_cost_orig, "changed": rl_cost_changed},
+        "ABC Agent": {"original": abc_cost_orig, "changed": abc_cost_changed},
+        "Random Agent": {"original": random_cost_orig, "changed": random_cost_changed}
+    }
+
+    # --- 5. Berechnen und ausgeben der prozentualen Veränderung für jeden Agenten (NEU) ---
+    print("\n" + "=" * 50 + "\n--- Kostensteigerung durch Popularitätsänderung ---\n" + "=" * 50)
+
+    if rl_cost_orig > 0:
+        rl_change = ((rl_cost_changed - rl_cost_orig) / rl_cost_orig) * 100
+        print(f"RL Agent Kostensteigerung:       {rl_change:+.2f}%")
+
+    if abc_cost_orig > 0:
+        abc_change = ((abc_cost_changed - abc_cost_orig) / abc_cost_orig) * 100
+        print(f"ABC Agent Kostensteigerung:      {abc_change:+.2f}%")
+
+    if random_cost_orig > 0:
+        random_change = ((random_cost_changed - random_cost_orig) / random_cost_orig) * 100
+        print(f"Zufälliger Agent Kostensteigerung: {random_change:+.2f}%")
+
+    print("\n(Ein höherer Prozentsatz bedeutet eine geringere Anpassungsfähigkeit)")
+    print("=" * 50)
+
+    # Plot the results using the new slopegraph function
+    plot_adaptability_slopegraph(results)
+
 if __name__ == '__main__':
     layout = np.array([[0, 0, 0, 0, 0, 0, 0],
                        [0, 1, 1, 0, 1, 1, 0],
@@ -480,10 +694,13 @@ if __name__ == '__main__':
                        ])
     IO_POINT = (0, 4)
     CSV_FILE = 'werkstattlager_logs.csv'
+    CSV_FILE_ADAPTABILITY = "werkstattlager_logs_changed_pop.csv"
 
     # Train the PPO Agent
-    #trained_model_path = "models/final_model_20250830-183144"
-    trained_model_path = train_agent(CSV_FILE, layout, IO_POINT, timesteps=1_000_000)
+    trained_model_path = "models/final_model_20250830-191215"
+    #trained_model_path = "models/final_model_20250831-160916"
+    #trained_model_path = train_agent(CSV_FILE, layout, IO_POINT, timesteps=400_000)
 
     # Run all evaluations
     run_all_evaluations(trained_model_path, CSV_FILE, layout, IO_POINT)
+    run_adaptability_scenario(trained_model_path, CSV_FILE, CSV_FILE_ADAPTABILITY, layout, IO_POINT)

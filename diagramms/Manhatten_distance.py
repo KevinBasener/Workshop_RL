@@ -8,7 +8,7 @@ def generate_cost_heatmap(width=10, height=10):
     für ein gegebenes Lagerlayout, ohne abgeschnittene Ränder.
     """
     # 1. Definition des Lagerlayouts und des I/O-Punktes
-    io_point = (0, 0)
+    io_point = (0, 4)
 
     # 2. Erstellung eines Kosten-Gitters
     cost_grid = np.zeros((height, width))
