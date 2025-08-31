@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from datetime import datetime
 
 import pygame
+from matplotlib import pyplot as plt
 # Import the pathfinding library
 from pathfinding.core.grid import Grid
 from pathfinding.finder.a_star import AStarFinder
@@ -406,6 +407,65 @@ def run_all_evaluations(model_path, csv_path, layout_grid, io_point):
     evaluate_abc_agent(csv_path, layout_grid, io_point)
     evaluate_random_agent(csv_path, layout_grid, io_point, num_episodes=10)
 
+
+def plot_agent_comparison(results: dict, filename="agent_comparison.png"):
+    """
+    Creates a bar chart comparing the performance of different agents.
+
+    Args:
+        results (dict): A dictionary with agent names as keys and (cost, std_dev) as values.
+        filename (str): The name of the file to save the plot.
+    """
+    agents = list(results.keys())
+    costs = [res[0] for res in results.values()]
+    std_devs = [res[1] for res in results.values()]
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    bars = ax.bar(agents, costs, yerr=std_devs, capsize=5, color=['#1f77b4', '#ff7f0e', '#2ca02c'])
+
+    ax.set_ylabel('Average Total Picking Cost (Lower is Better)')
+    ax.set_title('Agent Performance Comparison (Original Data)')
+    ax.set_xticks(range(len(agents)))
+    ax.set_xticklabels(agents, rotation=0)
+
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2.0, yval + np.mean(std_devs) * 0.1, f'{yval:.2f}', va='bottom',
+                ha='center')
+
+    plt.tight_layout()
+    plt.savefig(filename)
+    print(f"\nSaved comparison plot to {filename}")
+    plt.close()
+
+
+def plot_popularity_change_impact(results: dict, filename="popularity_impact.png"):
+    """
+    Creates a grouped bar chart showing the impact of changed popularity on agent performance.
+    """
+    labels = list(results.keys())
+    costs = [res[0] for res in results.values()]
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(12, 7))
+
+    bars = ax.bar(labels, costs, color=['#d62728', '#9467bd', '#1f77b4'])
+
+    ax.set_ylabel('Average Total Picking Cost on NEW Data')
+    ax.set_title('Agent Adaptability to Changed Item Popularity')
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=0, ha='center')
+
+    for bar in bars:
+        yval = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2.0, yval + 5, f'{yval:.2f}', va='bottom', ha='center')
+
+    plt.tight_layout()
+    plt.savefig(filename)
+    print(f"Saved popularity impact plot to {filename}")
+    plt.close()
 
 if __name__ == '__main__':
     layout = np.array([[0, 0, 0, 0, 0, 0, 0],
