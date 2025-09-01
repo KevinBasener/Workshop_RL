@@ -96,16 +96,20 @@ def generate_layout_image():
     Generiert ein Bild des Lagerlayouts basierend auf der Vorgabe.
     """
     pygame.init()
+    # layout = [
+    #     "0000000",  # Obere 0-Reihe
+    #     "0110110",  # Reihe 1
+    #     "0110110",  # Reihe 2
+    #     "0110110",  # Reihe 3
+    #     "0110110",  # Reihe 4
+    #     "0110110",  # Reihe 5
+    #     "0110110",  # Reihe 6
+    #     "0110110",  # Reihe 7
+    #     "0000000"   # Untere 0-Reihe
+    # ]
+
     layout = [
-        "0000000",  # Obere 0-Reihe
-        "0110110",  # Reihe 1
-        "0110110",  # Reihe 2
-        "0110110",  # Reihe 3
-        "0110110",  # Reihe 4
-        "0110110",  # Reihe 5
-        "0110110",  # Reihe 6
-        "0110110",  # Reihe 7
-        "0000000"   # Untere 0-Reihe
+        "000000000","000000000","000000000","000000000","000000000"
     ]
 
     rows, cols = len(layout), len(layout[0])

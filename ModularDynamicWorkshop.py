@@ -441,8 +441,8 @@ class DynamicWorkshop(gym.Env):
 # außer bei der Instanziierung der Umgebung)
 
 # --- Control Flags ---
-TRAIN_MODELS = False
-EVALUATE_MODEL = True
+TRAIN_MODELS = True
+EVALUATE_MODEL = False
 PLAY_GAME = False
 
 base_log_dir = "dqn_workshop_runs"
@@ -484,7 +484,7 @@ if __name__ == '__main__':
                         exploration_final_eps=0.67, tensorboard_log=log_dir, policy_kwargs=policy_kwargs)
 
         print("--- Starting DQN Training... ---")
-        model_dqn.learn(total_timesteps=5000000)
+        model_dqn.learn(total_timesteps=500000)
         model_dqn.save(model_path)
         print(f"--- DQN Training finished. Model saved to {model_path} ---")
 
