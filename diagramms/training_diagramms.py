@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Load the training data from the CSV file
-df = pd.read_csv('DQN_1_mit_Auslagerungsbelohnung.csv')
+df = pd.read_csv('run_39_DQN_ohne_Auslagerungsbelohnung.csv')
 
 # Create a figure and axis for the plot
 plt.figure(figsize=(12, 6))
@@ -11,7 +11,7 @@ plt.figure(figsize=(12, 6))
 plt.plot(df['Step'], df['Value'], label='Reward', alpha=0.5)
 
 # Calculate and plot a rolling mean to show the trend
-rolling_mean = df['Value'].rolling(window=10).mean()
+rolling_mean = df['Value'].rolling(window=10, min_periods=1).mean()
 plt.plot(df['Step'], rolling_mean, label='Smoothed Reward (Rolling Mean)', color='red')
 
 # Set the title and labels for the plot
@@ -29,6 +29,6 @@ plt.grid(True)
 plt.xlim(left=0)
 
 # Save the plot to a file
-plt.savefig('reward_plot_action_mask.png')
+plt.savefig('reward_plot_action_mask_ohne_auslagern.png')
 
-print("Plot saved as reward_plot_action_mask.png")
+print("Plot saved as reward_plot_action_mask_ppo.png")

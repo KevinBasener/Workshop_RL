@@ -1,3 +1,5 @@
+import json
+
 import pygame
 import numpy as np
 
@@ -91,44 +93,64 @@ def generate_images():
     pygame.quit()
     print("\nAlle Bilder wurden erfolgreich generiert.")
 
-def generate_layout_image():
-    """
-    Generiert ein Bild des Lagerlayouts basierend auf der Vorgabe.
-    """
-    pygame.init()
-    # layout = [
-    #     "0000000",  # Obere 0-Reihe
-    #     "0110110",  # Reihe 1
-    #     "0110110",  # Reihe 2
-    #     "0110110",  # Reihe 3
-    #     "0110110",  # Reihe 4
-    #     "0110110",  # Reihe 5
-    #     "0110110",  # Reihe 6
-    #     "0110110",  # Reihe 7
-    #     "0000000"   # Untere 0-Reihe
-    # ]
 
-    layout = [
-        "000000000","000000000","000000000","000000000","000000000"
-    ]
-
-    rows, cols = len(layout), len(layout[0])
+def generate_layout_image(layout_data, filename, font):
+    """
+    Generiert ein Bild eines einzelnen Lagerlayouts basierend auf den übergebenen Daten.
+    """
+    rows, cols = len(layout_data), len(layout_data[0])
     surface = pygame.Surface((cols * CELL_SIZE, rows * CELL_SIZE))
 
-    for row_idx, row in enumerate(layout):
-        for col_idx, cell in enumerate(row):
+    for row_idx, row in enumerate(layout_data):
+        for col_idx, cell_char in enumerate(row):
             rect = pygame.Rect(col_idx * CELL_SIZE, row_idx * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-            if cell == "1":
-                color = COLORS["rack"]
-            else:
-                color = COLORS["aisle"]
+
+            # Zellfarben und Buchstaben basierend auf dem Layout-Zeichen zuweisen
+            color_map = {
+                '0': COLORS["aisle"],
+                '1': COLORS["rack"],
+                '2': COLORS["popularity_a"],
+                '3': COLORS["popularity_b"],
+                '4': COLORS["popularity_c"],
+                'I': COLORS["io_point"],
+            }
+            text_map = {'2': 'A', '3': 'B', '4': 'C', 'I': 'I/O'}
+
+            color = color_map.get(cell_char, COLORS["aisle"])
+            text_char = text_map.get(cell_char, '')
+
             surface.fill(color, rect)
             pygame.draw.rect(surface, COLORS["border"], rect, 1)
 
-    pygame.image.save(surface, f"{OUTPUT_PATH}/lagerlayout.png")
-    pygame.quit()
-    print("Das Bild 'lagerlayout.png' wurde erfolgreich generiert.")
+            # Buchstaben in die Zelle zeichnen
+            if text_char:
+                text_surf = font.render(text_char, True, COLORS["border"])
+                text_rect = text_surf.get_rect(center=rect.center)
+                surface.blit(text_surf, text_rect)
+
+    pygame.image.save(surface, f"{OUTPUT_PATH}/{filename}")
+    print(f"Das Bild '{filename}' wurde erfolgreich generiert.")
 
 if __name__ == "__main__":
+    # 1. Generiere die Legendenbilder (optional, kann auskommentiert werden)
     generate_images()
-    generate_layout_image()
+
+    # 2. Lade die Layouts aus der JSON-Datei und generiere die Bilder
+    print("\nStarte die Generierung der Layout-Bilder aus JSON...")
+    pygame.init()
+    # Kleinere Schriftart für "I/O", damit es gut in die Zelle passt
+    io_font = pygame.font.SysFont(None, 36)
+
+    try:
+        with open('dqn_middle.json', 'r') as f:
+            all_layouts = json.load(f)
+
+        for layout_name, layout_data in all_layouts.items():
+            filename = f"{layout_name}.png"
+            generate_layout_image(layout_data, filename, io_font)
+
+    except FileNotFoundError:
+        print("FEHLER: Die Datei 'layouts.json' wurde nicht gefunden. Bitte erstellen Sie sie.")
+
+    pygame.quit()
+    print("\nAlle Layout-Bilder wurden erfolgreich generiert.")

@@ -321,7 +321,7 @@ def evaluate_abc_agent(csv_path: str, layout_grid: np.ndarray, io_point: tuple, 
 
 def evaluate_model(model_path: str, csv_path: str, layout_grid: np.ndarray, io_point: tuple, num_episodes: int = 10):
     print(f"\n--- Evaluating PPO Agent: {os.path.basename(model_path)} ---")
-    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point)
+    eval_env = WarehouseEnv(csv_path=csv_path, layout_grid=layout_grid, io_point=io_point, render_mode="human")
     model = PPO.load(model_path, env=eval_env)
 
     total_rewards = []
